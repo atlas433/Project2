@@ -461,5 +461,6 @@ def save_stl_to_json():
 if __name__ == "__main__":
     #save_stl_to_json()
     print("STL slicing and JSON saving completed.")
+    print("Run tests to verify functionality.")
     
     
