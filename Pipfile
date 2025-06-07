@@ -8,10 +8,15 @@ numpy = "*"
 matplotlib = "*"
 shapely = "*"
 vtk = "*"
+pandas = "*"
+ansys-dpf-core = "*"
+scikit-learn = "*"
+pyvista = "*"
 
 [dev-packages]
 pytest = "*"
 black = "*"
+ipykernel = "*"
 
 [requires]
 python_version = "3.12"
