@@ -8,6 +8,7 @@ numpy = "*"
 matplotlib = "*"
 shapely = "*"
 vtk = "*"
+trimesh = "*"
 
 [dev-packages]
 pytest = "*"
