@@ -22,7 +22,12 @@ class StressLayerData:
     regions: Dict[str, List[List[List[float]]]]  # stress_level -> list of polygons -> list of points -> [x, y]
     node_count: int
     stress_statistics: Dict[str, float]
-    nodes : Optional[np.ndarray] = None  # Array of nodes in the slice
+    nodes : Optional[np.ndarray] = None  # Array of nodes in the 
+    
+    def to_summary_dict(self) -> dict:
+        keys = ["layer_height", "thickness", "regions", "node_count", "stress_statistics"]
+        return {k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                for k, v in asdict(self).items() if k in keys}
 
 @dataclass
 class StressContour:
@@ -291,9 +296,6 @@ class FEMAnalysis:
             slice_nodes = fem_nodes[slice_mask]
             tries += 1
 
-        print(f"[DEBUG] Nodes in slice: {np.sum(slice_mask)} / {len(self.nodes)}")
-
-
         return slice_nodes
 
     def classify_and_cluster_stress_regions(
@@ -489,7 +491,142 @@ class FEMAnalysis:
 
         return cleaned
 
+    
 
+    def slice_with_stress_analysis(self, z_heights: List[float], thickness: float = 0.1, 
+                                 zone_per_slice: Optional[int] = 3) -> List[Dict[str, Any]]:
+        """
+        Enhanced slicing function that processes multiple Z heights with zone limiting.
+        
+        Parameters:
+            z_heights (List[float]): List of Z heights to process
+            thickness (float): Layer thickness (default: 0.1)
+            zone_per_slice (int, optional): Maximum number of zones per slice (default: 3)
+            
+        Returns:
+            List[Dict[str, Any]]: List of processed layer results
+        """
+        results = []
+        
+        if self.nodes is None:
+            self.get_node_data_with_stress()
+            
+        # Calculate stress thresholds based on bins
+        
+            
+        stress_thresholds = self.stress_thresshold
+
+    
+        for z in z_heights:
+            # Extract nodes and regions with zone limiting
+            slice_result = self.generate_slice_stress_regions(z=z, thickness=thickness)
+            
+            # Convert to serializable format
+            regions_serializable = {}
+            total_area = 0.0
+            
+            for stress_level, polygons in slice_result["regions"].items():
+                regions_serializable[stress_level] = []
+                for poly in polygons:
+                    if hasattr(poly, 'exterior'):
+                        # Single polygon
+                        coords = list(poly.exterior.coords[:-1])  # Remove duplicate last point
+                        regions_serializable[stress_level].append(coords)
+                        total_area += poly.area
+                    elif hasattr(poly, 'geoms'):
+                        # MultiPolygon
+                        for sub_poly in poly.geoms:
+                            coords = list(sub_poly.exterior.coords[:-1])
+                            regions_serializable[stress_level].append(coords)
+                            total_area += sub_poly.area
+            
+            # Get stress statistics for this slice
+            slice_nodes = slice_result["slice_nodes"]
+            if len(slice_nodes) > 0:
+                slice_stress_values = slice_nodes[:, 3]  # VonMises column
+                stress_stats = {
+                    "min_stress": float(np.min(slice_stress_values)),
+                    "max_stress": float(np.max(slice_stress_values)),
+                    "mean_stress": float(np.mean(slice_stress_values)),
+                    "std_stress": float(np.std(slice_stress_values)),
+                    "median_stress": float(np.median(slice_stress_values))
+                }
+            else:
+                stress_stats = {
+                    "min_stress": 0.0,
+                    "max_stress": 0.0,
+                    "mean_stress": 0.0,
+                    "std_stress": 0.0,
+                    "median_stress": 0.0
+                }
+            
+            layer_data = StressLayerData(
+                layer_height=float(z),
+                thickness=float(thickness),
+                regions=regions_serializable,
+                node_count=len(slice_nodes),
+                stress_statistics=stress_stats,
+                nodes=slice_nodes
+            )
+            
+            results.append({
+                "layer_data": layer_data,
+                "regions": slice_result["regions"],
+                "slice_nodes": slice_nodes,
+                "stress_thresholds": stress_thresholds,
+                "zone_count": sum(len(polys) for polys in slice_result["regions"].values()),
+                "zone_limit_applied": zone_per_slice is not None
+            })
+        
+        return results
+
+    def get_fem_model_bounds(self) -> Dict[str, Tuple[float, float]]:
+        """
+        Get the spatial bounds of the FEM model.
+        
+        Returns:
+            dict: Dictionary with 'x', 'y', 'z' keys containing (min, max) tuples
+        """
+        if self.nodes is None:
+            self.get_node_data_with_stress()
+            
+        coords = self.nodes[:, 1:4]  # Extract X, Y, Z coordinates
+
+        
+
+        print("**" * 50)
+        print(f"[INFO] FEM model bounds: X({np.min(coords[:, 0])}, {np.max(coords[:, 0])}), "
+              f"Y({np.min(coords[:, 1])}, {np.max(coords[:, 1])}), "
+              f"Z({np.min(coords[:, 2])}, {np.max(coords[:, 2])})")
+        print("**" * 50)
+
+        return {
+            'x': (float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))),
+            'y': (float(np.min(coords[:, 1])), float(np.max(coords[:, 1]))),
+            'z': (float(np.min(coords[:, 2])), float(np.max(coords[:, 2])))
+        }
+    
+    def get_stress_statistics(self):
+        """
+        Get statistical information about the stress data.
+        
+        Returns:
+            dict: Dictionary containing stress statistics
+        """
+        if self.nodes is None:
+            self.get_node_data_with_stress()
+            
+        stress_values = self.nodes[:, 3]  # VonMises column
+        
+        return {
+            "min_stress": np.min(stress_values),
+            "max_stress": np.max(stress_values),
+            "mean_stress": np.mean(stress_values),
+            "std_stress": np.std(stress_values),
+            "median_stress": np.median(stress_values),
+            "stress_bins": self.stress_bins,
+            "num_nodes": len(stress_values)
+        }
 
 
     
