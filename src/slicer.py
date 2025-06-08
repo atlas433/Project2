@@ -381,7 +381,7 @@ class STLSlicer:
                     interior_points = np.array(interior_coords)
                     hole_contour = Contour(
                         id=hole_id,
-                        type="hole",
+                        type="inner",
                         points=interior_points
                     )
                     stl_children.append(hole_contour)
@@ -408,6 +408,103 @@ class STLSlicer:
             contours.append(main_contour)
         
         return contours
+    
+    def _create_stress_child_contours(self, stress_regions: dict, parent_polygon: Polygon,
+                                    z_height: float, layer_id: int, 
+                                    start_counter: int, zone_per_slice: Optional[int] = None) -> List[Contour]:
+        """
+        Create child contours for stress regions that intersect with the parent polygon.
+        
+        Args:
+            stress_regions (dict): Stress-classified regions {"low": [...], "moderate": [...], "high": [...]}
+            parent_polygon (Polygon): Parent STL polygon to intersect with
+            z_height (float): Z height of the layer
+            layer_id (int): Layer identifier
+            start_counter (int): Starting counter for contour IDs
+            zone_per_slice (int, optional): Maximum number of stress zones per slice
+            
+        Returns:
+            List[Contour]: List of stress-based child contours
+        """
+        stress_children = []
+        contour_counter = start_counter
+        
+        # Collect all stress contours with their areas for zone limiting
+        all_stress_contours = []
+        
+        # Process each stress level
+        for stress_level in ["high", "moderate", "low"]:  # Process high stress first (priority)
+            if stress_level not in stress_regions:
+                continue
+                
+            stress_polygons = stress_regions[stress_level]
+            
+            for stress_poly in stress_polygons:
+                try:
+                    # Find intersection with parent polygon
+                    intersection = parent_polygon.intersection(stress_poly)
+                    
+                    if intersection.is_empty:
+                        continue
+                    
+                    # Handle different intersection types
+
+                    
+                    intersected_polygons = []
+
+                    
+                    if isinstance(intersection, Polygon):
+                        intersected_polygons.append(intersection)
+                    elif isinstance(intersection, MultiPolygon):
+                        intersected_polygons.extend(intersection.geoms)
+                                    
+                    # Create contours for intersected stress regions
+                    for intersected_poly in intersected_polygons:
+                        if hasattr(intersected_poly, 'exterior'):
+                            exterior_coords = list(intersected_poly.exterior.coords)
+                            if len(exterior_coords) >= 4:
+                                stress_contour_id = f"L{layer_id}_S{stress_level.upper()}{contour_counter}"
+                                contour_counter += 1
+                                
+                                #stress_points = [Point(coord[0], coord[1]) for coord in exterior_coords]
+                                stress_points = np.array(exterior_coords)
+                                stress_contour = Contour(
+                                    id=stress_contour_id,
+                                    type=f"zone",  # Use "zone" type to match template
+                                    points=stress_points,
+                                    properties={"stress_class": stress_level}
+                                )
+                                
+                                # Store contour with area and priority for zone limiting
+                                priority = {"high": 3, "moderate": 2, "low": 1}[stress_level]
+                                all_stress_contours.append({
+                                    "contour": stress_contour,
+                                    "area": intersected_poly.area,
+                                    "priority": priority,
+                                    "stress_level": stress_level
+                                })
+                                
+                except Exception as e:
+                    print(f"Warning: Failed to process stress region intersection: {str(e)}")
+                    continue
+        
+        # Apply zone limiting if specified
+        if zone_per_slice is not None and len(all_stress_contours) > zone_per_slice:
+            # Sort by priority (high stress first) then by area (largest first)
+            all_stress_contours.sort(key=lambda x: (-x["priority"], -x["area"]))
+            
+            # Keep only the top zones
+            selected_contours = all_stress_contours[:zone_per_slice]
+            stress_children = [item["contour"] for item in selected_contours]
+            
+            # Log zone limiting action
+            print(f"Zone limiting applied: reduced from {len(all_stress_contours)} to {zone_per_slice} stress zones at Z={z_height:.3f}")
+        else:
+            # No zone limiting, use all contours
+            stress_children = [item["contour"] for item in all_stress_contours]
+        
+        return stress_children
+    
     
     def merge_overlapping_polygons(self, polygons: List[Polygon]) -> List[Polygon]:
         """
