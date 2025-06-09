@@ -563,6 +563,5 @@ if __name__ == "__main__":
         print("   - shapely")
         print("   - ansys-dpf-core")
         print("   - scikit-learn")
-        print("   - numpy")
         print("3. The STL and RST files are valid")
 
