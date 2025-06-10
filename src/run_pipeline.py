@@ -19,6 +19,7 @@ class ProductionConfig:
     # STL Processing
     stl_file: str = r"C:\DEV\Project2\data\geo_test3.stl"
     json_file: str = r"C:\DEV\Project2\data\geometry.json"
+    csv_file: str = r"C:\DEV\Project2\data\fem_data.csv"
     layer_height: float = 0.1
     merge_overlapping: bool = True
     
@@ -27,11 +28,12 @@ class ProductionConfig:
     num_stress_classes: int = 3
     
     # Clustering Parameters
-    eps: float = 0.3                   # DBSCAN radius [mm] (Search radius)
-    min_samples: int = 3             # Cluster forms with at least 3 points
-    min_cluster_area: float = 3   # Minimum polygon area = 1 mm² --> it filters out tiny polygons
-    min_nodes: int = 150
-    max_allowed: float = 0.5
+    eps: float = 0.5                   # DBSCAN: radius [mm] (Search radius) 0.3 mm
+    min_samples: int = 3               # DBSCAN: Cluster forms with at least 3 points
+
+    min_cluster_area: float = 10   # Minimum polygon area = 1 mm² --> it filters out tiny polygons
+    min_nodes: int = 150          # Minimum nodes required in slice (default: 150)
+    max_allowed: float = 0.5   #Maximum tolerance for slice extraction (default: 0.5)
     
     
     
@@ -231,6 +233,15 @@ class IntegratedSlicingWorkflow:
 
                 output_files.append(str(stress_file))
                 self.logger.info(f"Stress analysis exported to: {stress_file}")
+            
+            # Export FEM data as csv
+            if self.config.export_json:
+                fem_file = self.output_dir / "production_fem_data.csv"
+                self.fem_analyzer.export_fem_nodes_to_csv(output_path=str(fem_file))
+                output_files.append(str(fem_file))
+                self.logger.info(f"FEM data exported to: {fem_file}")
+
+
             
             return output_files
             
@@ -433,8 +444,13 @@ class IntegratedSlicingWorkflow:
                 f.write(f"- **Min Stress:** {stats['min_stress']:.2f} MPa\n")
                 f.write(f"- **Max Stress:** {stats['max_stress']:.2f} MPa\n")
                 f.write(f"- **Mean Stress:** {stats['mean_stress']:.2f} MPa\n")
+                f.write(f"- **low Stress Threshold:** {stats['low_threshold']:.2f} MPa\n")
+                f.write(f"- **Moderate Stress Threshold:** {stats['moderate_threshold']:.2f} MPa\n")
                 f.write(f"- **Std Deviation:** {stats['std_stress']:.2f} MPa\n")
                 f.write(f"- **Total Nodes:** {stats['num_nodes']}\n\n")
+
+                
+
                 
                 # Output Files
                 f.write("## Output Files\n\n")
@@ -552,6 +568,10 @@ if __name__ == "__main__":
         print(f"   - Stress Range: {stats['min_stress']:.2f} - {stats['max_stress']:.2f} MPa")
         print(f"   - Mean Stress: {stats['mean_stress']:.2f} ± {stats['std_stress']:.2f} MPa")
         print(f"   - Total Nodes: {stats['num_nodes']:,}")
+        print(f"   - Low Stress Threshold: {stats['low_threshold']:.2f} MPa")
+        print(f"   - Moderate Stress Threshold: {stats['moderate_threshold']:.2f} MPa")
+
+        
 
 
     except Exception as e:

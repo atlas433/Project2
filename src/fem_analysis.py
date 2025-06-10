@@ -237,13 +237,13 @@ class FEMAnalysis:
         self.nodes = np.concatenate([node_info_sorted, vm_array_sorted[:, 1].reshape(-1, 1)], axis=1)
         return self.nodes # [NodeID, X, Y, Z, VonMises]
     
-    def calculate_stress_thresholds(self, streckgrenze: float = 520, sicherheitsfaktor: float = 1.5) -> tuple[float, float]:
+    def calculate_stress_thresholds(self, streckgrenze: float = 70, sicherheitsfaktor: float = 1.5) -> tuple[float, float]:
         """
         Berechnet die von-Mises-Grenzwerte für Spannungszonen (low, moderate, high)
         unter Berücksichtigung eines Sicherheitsfaktors.
 
         Args:
-            streckgrenze (float): Technische Streckgrenze (Rp0.2) des Materials in MPa.
+            streckgrenze (float): Technische Streckgrenze (Rp0.2) des Materials in MPa. 520
             sicherheitsfaktor (float): Sicherheitsfaktor zur konservativen Auslegung.
 
         Returns:
@@ -252,6 +252,8 @@ class FEMAnalysis:
         sigma_zul = streckgrenze / sicherheitsfaktor
         low_max = 0.3 * sigma_zul
         mod_max = 0.7 * sigma_zul
+
+        print(f"[INFO] Calculated stress thresholds: Low = {low_max:.2f} MPa, Moderate = {mod_max:.2f} MPa")
 
         self.stress_thresshold = (low_max, mod_max)
         return self.stress_thresshold
@@ -262,7 +264,7 @@ class FEMAnalysis:
 
         Args:
             z (float): Z height
-            thickness (float): Initial slice thickness
+            thickness (float): Initial slice thickness ; Default = 0.25 mm).
 
         Returns:
             np.ndarray: Array of shape (n_nodes_in_slice, 4) → [X, Y, Z, VonMises]
@@ -271,8 +273,6 @@ class FEMAnalysis:
         if self.nodes is None:
             self.get_node_data_with_stress()
         
-        
-
         # Basic checks
         if not isinstance(z, (int, float)) or not isinstance(thickness, (int, float)):
             raise TypeError("z and thickness must be numeric.")
@@ -282,12 +282,12 @@ class FEMAnalysis:
         z_coords = self.nodes[:, 3]  # Extract Z coordinates from nodes
         fem_nodes = self.nodes[:, 1:5] # Extract X, Y, Z coordinates from nodes
         tolerance = thickness
-        z_diffs = np.abs(z_coords - z)
+        z_diffs = np.abs(z_coords - z)  # [|z1 - z|, |z2 - z|, ...]
 
-        MAX_TRIES = 10
+        MAX_TRIES = 5
         tries = 0
 
-        slice_mask = z_diffs <= tolerance
+        slice_mask = z_diffs <= tolerance # mask : [True, False, True, ...]
         slice_nodes = fem_nodes[slice_mask]
 
         while slice_nodes.shape[0] < self.min_nodes and tolerance < self.max_allowed and tries < MAX_TRIES:
@@ -298,11 +298,7 @@ class FEMAnalysis:
 
         return slice_nodes
 
-    def classify_and_cluster_stress_regions(
-        self,
-        xy_points: np.ndarray,
-        stress_values: np.ndarray
-    ) -> dict:
+    def classify_and_cluster_stress_regions(self, xy_points: np.ndarray, stress_values: np.ndarray) -> dict:
         """
         Classify XY FEM node coordinates into stress zones and apply clustering
         to generate geometric regions.
@@ -330,6 +326,8 @@ class FEMAnalysis:
             "moderate": moderate_mask,
             "high": high_mask
         }
+        # print(f"[INFO] Stress masks created: low={np.sum(low_mask)}, moderate={np.sum(moderate_mask)}, high={np.sum(high_mask)}") for z = 0.0
+        
 
         regions = {"low": [], "moderate": [], "high": []}
 
@@ -399,9 +397,11 @@ class FEMAnalysis:
                         except:
                             pass  # Skip invalid polygons
 
+        
+
         return regions
 
-    def generate_slice_stress_regions(self, z: float, thickness: float = 0.25) -> dict | None:
+    def generate_slice_stress_regions(self, z: float, thickness: float = 0.25, zone_per_slice: int = 3) -> dict | None:
         """
         Generate stress-based regions for a specific Z-slice by classifying and clustering FEM nodes.
 
@@ -433,11 +433,104 @@ class FEMAnalysis:
         # Step 4: Clean overlaps
         cleaned_regions = self._clean_overlap_regions(regions)
 
+
+        # lets print data only for z = 0.0
+        if z == 0.0:
+            print("==" * 50)
+            print(f"[INFO] Processing slice at z={z:.3f} with thickness {thickness:.3f} mm")
+            #regions
+            print("Without cleaning:")
+            print(f"[INFO] Slice at z={z:.3f} has {len(regions['low'])} low, "
+                  f"{len(regions['moderate'])} moderate, and "
+                  f"{len(regions['high'])} high stress regions.")
+            print("After cleaning:")
+            print(f"[INFO] Slice at z={z:.3f} has {len(cleaned_regions['low'])} low, "
+                  f"{len(cleaned_regions['moderate'])} moderate, and "
+                  f"{len(cleaned_regions['high'])} high stress regions.")
+            print(f"[INFO] Slice nodes count: {slice_nodes.shape[0]}")
+
         # Step 5: Return result
+        # NEW: Zone limiting functionality
+        if zone_per_slice is not None and zone_per_slice > 0:
+            cleaned_regions = self._limit_zones_per_slice(cleaned_regions, zone_per_slice)
+
         return {
-            "regions": cleaned_regions,
+            "regions": regions,
             "slice_nodes": slice_nodes
         }
+
+    def _limit_zones_per_slice(self, regions: Dict[str, List], zone_per_slice: int) -> Dict[str, List]:
+        """
+        Limit the number of zones per slice by sorting by area and merging smaller zones.
+        
+        Parameters:
+            regions (Dict[str, List]): Dictionary of stress regions with polygons
+            zone_per_slice (int): Maximum number of zones allowed per slice. Defaults to 3
+            
+        Returns:
+            Dict[str, List]: Limited regions with merged smaller zones
+        """
+        # Collect all zones with their areas and stress levels
+        all_zones = []
+        for stress_level, polygons in regions.items():
+            for poly in polygons:
+                if hasattr(poly, 'area') and poly.area > 0:
+                    all_zones.append({
+                        'polygon': poly,
+                        'area': poly.area,
+                        'stress_level': stress_level
+                    })
+        
+        # If we have fewer zones than the limit, return as is
+        if len(all_zones) <= zone_per_slice:
+            return regions
+        
+        # Sort zones by area (largest first)
+        all_zones.sort(key=lambda x: x['area'], reverse=True)
+        
+        # Keep the largest zones
+        kept_zones = all_zones[:zone_per_slice]
+        remaining_zones = all_zones[zone_per_slice:]
+        
+        # Create new regions dict with kept zones
+        limited_regions = {"low": [], "moderate": [], "high": []}
+        for zone in kept_zones:
+            limited_regions[zone['stress_level']].append(zone['polygon'])
+        
+        # Merge remaining smaller zones into the nearest kept zones
+        for remaining_zone in remaining_zones:
+            best_match = None
+            min_distance = float('inf')
+            
+            # Find the closest kept zone by centroid distance
+            remaining_centroid = remaining_zone['polygon'].centroid
+            
+            for kept_zone in kept_zones:
+                kept_centroid = kept_zone['polygon'].centroid
+                distance = remaining_centroid.distance(kept_centroid)
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    best_match = kept_zone
+            
+            # Merge the remaining zone with the best match
+            if best_match is not None:
+                try:
+                    # Find the polygon in the limited_regions and merge
+                    stress_level = best_match['stress_level']
+                    for i, poly in enumerate(limited_regions[stress_level]):
+                        if poly == best_match['polygon']:
+                            # Merge the polygons
+                            merged_poly = unary_union([poly, remaining_zone['polygon']])
+                            limited_regions[stress_level][i] = merged_poly
+                            break
+                except Exception as e:
+                    # If merging fails, just skip this zone
+                    print(f"Warning: Could not merge zone: {e}")
+                    continue
+        
+        return limited_regions
+
 
 
     def _clean_overlap_regions(self, regions: dict) -> dict:
@@ -549,7 +642,9 @@ class FEMAnalysis:
                     "max_stress": float(np.max(slice_stress_values)),
                     "mean_stress": float(np.mean(slice_stress_values)),
                     "std_stress": float(np.std(slice_stress_values)),
-                    "median_stress": float(np.median(slice_stress_values))
+                    "median_stress": float(np.median(slice_stress_values)),
+                    "low_threshold": float(stress_thresholds[0]),
+                    "moderate_threshold": float(stress_thresholds[1])
                 }
             else:
                 stress_stats = {
@@ -557,7 +652,9 @@ class FEMAnalysis:
                     "max_stress": 0.0,
                     "mean_stress": 0.0,
                     "std_stress": 0.0,
-                    "median_stress": 0.0
+                    "median_stress": 0.0,
+                    "low_threshold": 0.0,
+                    "moderate_threshold": 0.0
                 }
             
             layer_data = StressLayerData(
@@ -616,7 +713,7 @@ class FEMAnalysis:
         if self.nodes is None:
             self.get_node_data_with_stress()
             
-        stress_values = self.nodes[:, 3]  # VonMises column
+        stress_values = self.nodes[:, 4]  # VonMises column
         
         return {
             "min_stress": np.min(stress_values),
@@ -625,11 +722,12 @@ class FEMAnalysis:
             "std_stress": np.std(stress_values),
             "median_stress": np.median(stress_values),
             "stress_bins": self.stress_bins,
-            "num_nodes": len(stress_values)
+            "num_nodes": len(stress_values),
+            "low_threshold": self.stress_thresshold[0],
+            "moderate_threshold": self.stress_thresshold[1]
         }
 
 
-    
     def export_fem_nodes_to_csv(self, output_path: str):
         """
         Export the FEM node data with von Mises stress to a CSV file.
