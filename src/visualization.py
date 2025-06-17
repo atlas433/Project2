@@ -8,6 +8,12 @@ import matplotlib.cm as cm
 from typing import List, Dict, Optional, Tuple, Any
 import warnings
 from matplotlib.widgets import TextBox
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.geometry import MultiPolygon
+from descartes import PolygonPatch
+
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path
 
 
 # Import our data structures
@@ -176,7 +182,6 @@ class VisualizationWidget:
 
             self.global_limits = ((x_min - x_padding, x_max + x_padding), (y_min - y_padding, y_max + y_padding))
 
-        print(f"Global limits X = {self.global_limits[0]}, Y = {self.global_limits[1]}")
         
 
 
@@ -196,6 +201,7 @@ class VisualizationWidget:
         
         # Add stress level types
         for stress_level in ['low', 'moderate', 'high']:
+            
             if stress_level in self.contour_colors:
                 color = self.contour_colors[stress_level]
                 alpha = self.contour_alphas.get(stress_level, 0.7)
@@ -251,16 +257,6 @@ class VisualizationWidget:
         max_stress = production_results.stress_statistics.get('max_stress', 0)
         self.stress_norm = Normalize(vmin=min_stress, vmax=max_stress)
 
-        # print some basic info stress statistics
-        print("++" * 100)
-        print(f"[Info] Stress statistics: Min = {min_stress:.2f}, Max = {max_stress:.2f}")
-        print("++" * 100)
-
-        # Clear stress cache when new data is loaded
-        #self._stress_cache.clear()
-        
-        print(f"Loaded {len(self.layer_geometry_data.layers)} layers from production results")
-        print(f"Z-height range: {min(self.z_heights):.3f} to {max(self.z_heights):.3f}")
         
 
     def update_visualization(self):
@@ -297,10 +293,195 @@ class VisualizationWidget:
         # Refresh the display
         self.fig.canvas.draw()
 
-    
-    
-    
     def _update_geometry_panel(self, layer: Layer):
+        """Update the geometry panel with contours and stress regions, handling zones with holes."""
+        # Remove previous patches
+        for coll in self._geometry_patches:
+            coll.remove()
+        self._geometry_patches.clear()
+
+        all_patches = []
+        all_colors = []
+        all_alphas = []
+        
+        # Process each contour in the layer
+        for contour in layer.contours:
+            # Add main contour outline if needed
+            if len(contour.points) >= 3:
+                coords = contour.points
+                patch = MPLPolygon(coords, closed=True)
+                all_patches.append(patch)
+                all_colors.append(self.contour_colors.get(contour.type, '#888888'))
+                all_alphas.append(self.contour_alphas.get(contour.type, 0.5))
+            
+            # Process child zones (stress regions)
+            for child in contour.children:
+                
+                
+                # Filter for zones you want to plot (e.g., high stress zones)
+                #if not (child.properties and child.properties.get("stress_class") == "high"):
+                    #continue
+                    
+                if child.type == "zone" and len(child.points) >= 3:
+                    # Create zone with holes
+                    zone_patch = self._create_zone_with_holes(child)
+                    if zone_patch:
+                        all_patches.append(zone_patch)
+                        
+                        # Get color and alpha for the zone
+                        color = self._get_contour_color(child)
+                        alpha = self._get_contour_alpha(child)
+                        
+                        all_colors.append(color)
+                        all_alphas.append(alpha)
+        
+        # Create patch collection for efficient rendering
+        if all_patches:
+            # Group patches by alpha for efficient rendering
+            alpha_groups = {}
+            for patch, color, alpha in zip(all_patches, all_colors, all_alphas):
+                if alpha not in alpha_groups:
+                    alpha_groups[alpha] = {'patches': [], 'colors': []}
+                alpha_groups[alpha]['patches'].append(patch)
+                alpha_groups[alpha]['colors'].append(color)
+            
+            # Add each alpha group as a separate collection
+            for alpha, group in alpha_groups.items():
+                collection = PatchCollection(group['patches'], alpha=alpha, 
+                                        facecolors=group['colors'], 
+                                        edgecolors='black', linewidths=0.5)
+                self.ax_geometry.add_collection(collection)
+                self._geometry_patches.append(collection)
+
+    def _create_zone_with_holes(self, zone):
+        """Create a matplotlib polygon patch for a zone that may contain holes."""
+        
+        
+        if len(zone.points) < 3:
+            return None
+        
+        # Start with the outer boundary of the zone
+        outer_coords = np.array(zone.points)
+        
+        # Check if zone has holes
+        holes = [child for child in zone.children if child.type == "hole"]
+        
+       
+        
+        if not holes:
+            
+            return MPLPolygon(outer_coords, closed=True)
+        
+        # Create a path with holes
+        vertices = []
+        codes = []
+        
+        # Add outer boundary
+        vertices.extend(outer_coords)
+        codes.extend([Path.MOVETO] + [Path.LINETO] * (len(outer_coords) - 1))
+        
+        # Add each hole
+        for hole in holes:
+            if len(hole.points) >= 3:
+                hole_coords = np.array(hole.points)
+                # Reverse hole coordinates to create proper hole (counter-clockwise)
+                hole_coords = hole_coords[::-1]
+                
+                vertices.extend(hole_coords)
+                codes.extend([Path.MOVETO] + [Path.LINETO] * (len(hole_coords) - 1))
+        
+        # Create path and patch
+        path = Path(vertices, codes)
+        patch = PathPatch(path)
+        
+        return patch
+
+    def _get_contour_color(self, contour):
+        """Get color for a contour based on its properties."""
+        if contour.properties and "stress_class" in contour.properties:
+            stress_class = contour.properties["stress_class"]
+            stress_colors = {
+                "high": "#FF4444",      # Red for high stress
+                "moderate": "#FFA500",  # Orange for moderate stress
+                "low": "#44FF44"        # Green for low stress
+            }
+            return stress_colors.get(stress_class, self.contour_colors.get(contour.type, '#888888'))
+        
+        return self.contour_colors.get(contour.type, '#888888')
+
+    def _get_contour_alpha(self, contour):
+        """Get alpha (transparency) for a contour."""
+        if contour.properties and "stress_class" in contour.properties:
+            return 0.7  # Higher opacity for stress zones
+        
+        return self.contour_alphas.get(contour.type, 0.5)
+
+    def _update_geometry_panel_v2(self, layer: Layer):
+        """Update the geometry panel with contours and stress regions, supporting holes."""
+        # Remove previous patches
+        for coll in self._geometry_patches:
+            coll.remove()
+        self._geometry_patches.clear()
+
+        # Prepare all patches and colors
+        all_patches = []
+        all_colors = []
+        all_alphas = []
+
+        for contour in layer.contours:
+            # Add main contour (outer geometry)
+            if len(contour.points) >= 3:
+                poly = ShapelyPolygon(contour.points)
+                patch = PolygonPatch(poly)
+                all_patches.append(patch)
+                all_colors.append(self.contour_colors.get(contour.type, '#888888'))
+                all_alphas.append(self.contour_alphas.get(contour.type, 0.5))
+
+            # Process children (stress zones or holes)
+            if contour.children:
+                for child in contour.children:
+                    if len(child.points) < 3:
+                        continue
+
+                    # Build shapely polygon
+                    outer_ring = child.points
+                    holes = [grandchild.points for grandchild in (child.children or []) if len(grandchild.points) >= 3]
+
+                    try:
+                        poly = ShapelyPolygon(outer_ring, holes)
+                        if not poly.is_valid or poly.is_empty:
+                            continue
+                    except Exception as e:
+                        print(f"[⚠️] Invalid polygon at {child.id}: {e}")
+                        continue
+
+                    patch = PolygonPatch(poly)
+                    all_patches.append(patch)
+
+                    color = self._get_contour_color(child)
+                    alpha = self._get_contour_alpha(child)
+                    all_colors.append(color)
+                    all_alphas.append(alpha)
+
+        # Group patches by alpha and add them
+        if all_patches:
+            from matplotlib.collections import PatchCollection
+            alpha_groups = {}
+            for patch, color, alpha in zip(all_patches, all_colors, all_alphas):
+                if alpha not in alpha_groups:
+                    alpha_groups[alpha] = {'patches': [], 'colors': []}
+                alpha_groups[alpha]['patches'].append(patch)
+                alpha_groups[alpha]['colors'].append(color)
+
+            for alpha, group in alpha_groups.items():
+                collection = PatchCollection(group['patches'], alpha=alpha,
+                                            facecolors=group['colors'],
+                                            edgecolors='black', linewidths=0.5)
+                self.ax_geometry.add_collection(collection)
+                self._geometry_patches.append(collection)
+
+    
+    def _update_geometry_panel_v1(self, layer: Layer):
         """Update the geometry panel with contours and stress regions."""
         # Remove previous patches
         for coll in self._geometry_patches:
@@ -325,6 +506,11 @@ class VisualizationWidget:
             
             # Add child contours (holes and stress regions)
             for child in contour.children:
+
+                # ✅ ONLY plot high stress zones
+                if not (child.properties and child.properties.get("stress_class") == "high"):
+                    continue
+                
                 if len(child.points) >= 3:
                     # Convert Point objects to coordinate arrays
                     child_coords = child.points

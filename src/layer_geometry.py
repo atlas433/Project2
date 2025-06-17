@@ -19,8 +19,9 @@ class Contour:
         result = {
             "id": self.id,
             "type": self.type,
-            "points": self.points.tolist()
-
+            "points": self.points.tolist(),
+            "properties": self.properties, # new
+            "children": [child.to_dict() for child in self.children] if self.children else [] #new
         }
         
         if self.properties:
@@ -39,7 +40,7 @@ class Contour:
         children = None
         if "children" in data:
             children = [cls.from_dict(child_data) for child_data in data["children"]]
-        
+            children = [cls.from_dict(c) for c in data.get("children", [])]  #new
         return cls(
             id=data["id"],
             type=data["type"],

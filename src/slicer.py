@@ -266,7 +266,7 @@ class STLSlicer:
 
     def slice(self, dt: LayerGeometryData, fem_analyzer: FEMAnalysis,
             layer_thickness: float = 0.1, zone_per_slice: Optional[int] = 3,
-            merge_overlapping: bool = True
+            merge_overlapping: bool = False
             ) -> LayerGeometryData:
         """
         Parallele Version: Enrich existing geometry (from JSON) with stress-based contours.
@@ -291,15 +291,19 @@ class STLSlicer:
                 return None
 
             if merge_overlapping:
-                stl_polygons_merged = self.merge_overlapping_polygons(stl_polygons)
+                stl_polygons_merged = self.merge_overlapping_polygons(stl_polygons) # we don't need this at aall
             else:
                 stl_polygons_merged = stl_polygons
 
+            print("=" * 80)
             print(f"Processing Layer {layer_id} at Z={z_height:.3f}")
+
+            outer_shape = unary_union(stl_polygons_merged)  # one-time per layer
+
 
             try:
                 stress_result = fem_analyzer.generate_slice_stress_regions(
-                    z=z_height, thickness=layer_thickness,
+                    z=z_height, thickness=layer_thickness, ensure_no_overlap=True, outer_shape=outer_shape
                 )
                 stress_regions = stress_result["regions"]
             except Exception as e:
@@ -319,8 +323,8 @@ class STLSlicer:
             return None
 
         #updated_layers = []
-        with ThreadPoolExecutor() as executor:
-            results = list(executor.map(process_layer, enumerate(dt.layers, 1)))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            results = list(executor.map(process_layer, enumerate(dt.layers[:10], 1)))
             updated_layers = [layer for layer in results if layer is not None]
 
         self.processing_time = time.time() - start_time
@@ -330,6 +334,134 @@ class STLSlicer:
         return LayerGeometryData(layers=updated_layers)
     
     def _create_hierarchical_contours(self, stl_polygons: List[Polygon], 
+                                    stress_regions: dict, z_height: float, 
+                                    layer_id: int, zone_per_slice: Optional[int] = None) -> List[Contour]:
+        """
+        Creates hierarchical contours:
+        - Outer STL-based contours (type: "outer")
+        - Children: STL holes (type: "hole"), stress zones (type: "zone")
+        - If a stress zone has holes, these are added as children of type "hole" inside the "zone"
+        """
+        if not stl_polygons:
+            return []
+
+        contours = []
+        contour_counter = 1
+
+        for i, stl_polygon in enumerate(stl_polygons):
+            if not stl_polygon.is_valid or stl_polygon.area <= self.tolerance:
+                continue
+
+            exterior_coords = list(stl_polygon.exterior.coords)
+            if len(exterior_coords) < 4:
+                continue
+
+            main_contour_id = f"L{layer_id}_C{contour_counter}"
+            contour_counter += 1
+            exterior_points = np.array(exterior_coords)
+
+            # Process STL internal holes as "hole" children
+            stl_children = []
+            for j, interior in enumerate(stl_polygon.interiors):
+                interior_coords = list(interior.coords)
+                if len(interior_coords) >= 4:
+                    hole_id = f"L{layer_id}_C{contour_counter}"
+                    contour_counter += 1
+                    interior_points = np.array(interior_coords)
+                    hole_contour = Contour(
+                        id=hole_id,
+                        type="hole",
+                        points=interior_points
+                    )
+                    stl_children.append(hole_contour)
+
+            # Add stress-based zone children
+            stress_children = self._create_stress_child_contours(
+                stress_regions, stl_polygon, z_height, layer_id, contour_counter, zone_per_slice
+            )
+            contour_counter += len(stress_children)
+
+            all_children = stl_children + stress_children
+
+            main_contour = Contour(
+                id=main_contour_id,
+                type="outer",
+                points=exterior_points,
+                children=all_children
+            )
+            contours.append(main_contour)
+
+        return contours
+
+    def _create_stress_child_contours(self, stress_regions: dict, parent_polygon: Polygon,
+                                    z_height: float, layer_id: int,
+                                    start_counter: int, zone_per_slice: Optional[int] = None) -> List[Contour]:
+        """
+        Creates contours for stress zones intersecting with an STL parent polygon.
+        Zones with holes get child contours of type "hole".
+        """
+        stress_children = []
+        contour_counter = start_counter
+        all_stress_contours = []
+
+        for stress_level in ["high", "moderate", "low"]:
+            for stress_poly in stress_regions.get(stress_level, []):
+                try:
+                    intersection = parent_polygon.intersection(stress_poly)
+                    if intersection.is_empty:
+                        continue
+
+                    if isinstance(intersection, Polygon):
+                        intersected_polygons = [intersection]
+                    elif isinstance(intersection, MultiPolygon):
+                        intersected_polygons = list(intersection.geoms)
+                    else:
+                        continue
+
+                    for poly in intersected_polygons:
+                        ext = list(poly.exterior.coords)
+                        if len(ext) < 4:
+                            continue
+
+                        zone_id = f"L{layer_id}_S{stress_level.upper()}{contour_counter}"
+                        contour_counter += 1
+                        hole_children = []
+
+                        for h_idx, hole in enumerate(poly.interiors):
+                            hole_coords = list(hole.coords)
+                            if len(hole_coords) >= 4:
+                                hole_id = f"{zone_id}_H{h_idx}"
+                                hole_children.append(
+                                    Contour(id=hole_id, type="hole", points=np.array(hole_coords))
+                                )
+
+                        zone_contour = Contour(
+                            id=zone_id,
+                            type="zone",
+                            points=np.array(ext),
+                            properties={"stress_class": stress_level},
+                            children=hole_children
+                        )
+
+                        all_stress_contours.append({
+                            "contour": zone_contour,
+                            "area": poly.area,
+                            "priority": {"high": 3, "moderate": 2, "low": 1}[stress_level]
+                        })
+
+                except Exception as e:
+                    print(f"[Warning] Failed to process {stress_level} region: {e}")
+                    continue
+
+        if zone_per_slice is not None and len(all_stress_contours) > zone_per_slice:
+            all_stress_contours.sort(key=lambda x: (-x["priority"], -x["area"]))
+            all_stress_contours = all_stress_contours[:zone_per_slice]
+            print(f"[INFO] Zone limiting applied: {len(all_stress_contours)} zones selected at z={z_height:.3f}")
+
+        return [item["contour"] for item in all_stress_contours]
+
+    
+    def _create_hierarchical_contours_old(self, stl_polygons: List[Polygon], 
                                     stress_regions: dict, z_height: float, 
                                     layer_id: int, zone_per_slice: Optional[int] = None) -> List[Contour]:
         """
@@ -409,7 +541,7 @@ class STLSlicer:
         
         return contours
     
-    def _create_stress_child_contours(self, stress_regions: dict, parent_polygon: Polygon,
+    def _create_stress_child_contours_old(self, stress_regions: dict, parent_polygon: Polygon,
                                     z_height: float, layer_id: int, 
                                     start_counter: int, zone_per_slice: Optional[int] = None) -> List[Contour]:
         """
@@ -556,7 +688,7 @@ def save_stl_to_json():
 
 
 if __name__ == "__main__":
-    #save_stl_to_json()
+    save_stl_to_json()
     print("STL slicing and JSON saving completed.")
     print("Run tests to verify functionality.")
     

@@ -21,24 +21,24 @@ class ProductionConfig:
     json_file: str = r"C:\DEV\Project2\data\geometry.json"
     csv_file: str = r"C:\DEV\Project2\data\fem_data.csv"
     layer_height: float = 0.1
-    merge_overlapping: bool = True
+    merge_overlapping: bool = False
     
     # FEM Analysis
     rst_file: str = r"C:\DEV\Project2\data\file_test3.rst"
-    num_stress_classes: int = 3
+    num_stress_classes: int = 5 # default 3
     
     # Clustering Parameters
     eps: float = 0.5                   # DBSCAN: radius [mm] (Search radius) 0.3 mm
     min_samples: int = 3               # DBSCAN: Cluster forms with at least 3 points
 
-    min_cluster_area: float = 10   # Minimum polygon area = 1 mm² --> it filters out tiny polygons
-    min_nodes: int = 150          # Minimum nodes required in slice (default: 150)
+    min_cluster_area: float = 2   # Minimum polygon area = 1 mm² --> it filters out tiny polygons
+    min_nodes: int = 50          # Minimum nodes required in slice (default: 150)
     max_allowed: float = 0.5   #Maximum tolerance for slice extraction (default: 0.5)
     
     
     
     # Production Limits
-    zone_per_slice: int = 3
+    zone_per_slice: int = 6    #default 3
     max_layers: Optional[int] = None
     z_range: Optional[Tuple[float, float]] = None
     
@@ -178,7 +178,7 @@ class IntegratedSlicingWorkflow:
         try:
             # Perform stress-integrated slicing
             layer_geometry_data = self.slicer.slice(
-                        dt=self.geometry_data,
+                        dt=self.geometry_data,  
                         fem_analyzer=self.fem_analyzer,
                         merge_overlapping=self.config.merge_overlapping,
                         layer_thickness=self.config.layer_height,
@@ -301,8 +301,7 @@ class IntegratedSlicingWorkflow:
         try:
             stress_results = self.fem_analyzer.slice_with_stress_analysis(
                 z_heights=z_heights,
-                thickness=self.config.layer_height,
-                zone_per_slice=self.config.zone_per_slice
+                thickness=self.config.layer_height
             )
             
             stress_layer_data = []
