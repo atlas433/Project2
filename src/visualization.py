@@ -319,7 +319,7 @@ class VisualizationWidget:
                 
                 
                 # Filter for zones you want to plot (e.g., high stress zones)
-                #if not (child.properties and child.properties.get("stress_class") == "high"):
+                #if not (child.properties and child.properties.get("stress_class") == "low"):
                     #continue
                     
                 if child.type == "zone" and len(child.points) >= 3:

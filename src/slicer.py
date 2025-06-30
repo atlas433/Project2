@@ -2,11 +2,11 @@ import numpy as np
 import trimesh
 from shapely.geometry import Polygon, MultiPolygon, Point
 from shapely.ops import unary_union
-from typing import List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union
 import time
 from concurrent.futures import ThreadPoolExecutor
 from layer_geometry import Layer, Contour, LayerGeometryData, LayerGeometryHandler
-from fem_analysis import FEMAnalysis
+from fem_analysis import FEMAnalysis, StressLayerData
 
 
 class STLSlicer:
@@ -330,9 +330,85 @@ class STLSlicer:
         self.processing_time = time.time() - start_time
         print(f"Parallel stress-integrated slicing complete in {self.processing_time:.2f} seconds: ")
         print(f"Stress-integrated slicing complete: {len(updated_layers)} layers generated")
+        print("***" * 80)
 
         return LayerGeometryData(layers=updated_layers)
     
+    def slice_new(self, dt: LayerGeometryData, fem_analyzer: FEMAnalysis,
+              layer_thickness: float = 0.1, zone_per_slice: Optional[int] = 3,
+              merge_overlapping: bool = False) -> Tuple[LayerGeometryData, List[StressLayerData]]:
+        """
+        Parallel slicing function using stress-enhanced analysis.
+
+        Returns:
+            Tuple[LayerGeometryData, List[StressLayerData]]: STL geometry and layer-wise stress data
+        """
+        start_time = time.time()
+
+        def process_layer(args):
+            layer_id, layer = args
+            z_height = layer.z_height
+            stl_polygons = []
+
+            for contour in layer.contours:
+                try:
+                    poly = Polygon(contour.points)
+                    if poly.is_valid and poly.area > 1e-6:
+                        stl_polygons.append(poly)
+                except Exception as e:
+                    print(f"Warning: Invalid contour in Layer {layer_id}: {e}")
+
+            if not stl_polygons:
+                return None
+
+            stl_polygons_merged = (
+                self.merge_overlapping_polygons(stl_polygons)
+                if merge_overlapping else stl_polygons)
+
+            print("=" * 80)
+            print(f"Processing Layer {layer_id} at Z={z_height:.3f}")
+
+            outer_shape = unary_union(stl_polygons_merged)
+
+            try:
+                analysis_result = fem_analyzer.slice_with_stress_analysis_new(
+                    z=z_height,
+                    thickness=layer_thickness,
+                    zone_per_slice=zone_per_slice,
+                    ensure_no_overlap=False,
+                    outer_shape=outer_shape
+                )
+                return analysis_result
+            except Exception as e:
+                print(f"Warning: Failed to extract stress regions at Z={z_height:.3f}: {str(e)}")
+                return None
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            results = list(executor.map(process_layer, enumerate(dt.layers[8:11], 1)))
+
+        updated_layers = []
+        stress_layer_data = []
+
+        for result, layer in zip(results, dt.layers):
+            if result is not None:
+                stress_layer_data.append(result["layer_data"])
+
+                stress_regions = result["regions"]
+                stl_polygons = [Polygon(contour.points) for contour in layer.contours if Polygon(contour.points).is_valid and Polygon(contour.points).area > 1e-6]
+                if merge_overlapping:
+                    stl_polygons = self.merge_overlapping_polygons(stl_polygons)
+                layer_contours = self._create_hierarchical_contours(
+                    stl_polygons, stress_regions, layer.z_height, layer_id=0, zone_per_slice=zone_per_slice
+                )
+                updated_layers.append(Layer(z_height=layer.z_height, contours=layer_contours))
+
+        self.processing_time = time.time() - start_time
+        print(f"Parallel stress-integrated slicing complete in {self.processing_time:.2f} seconds")
+        print(f"Total layers processed: {len(updated_layers)}")
+        print("***" * 80)
+
+        return LayerGeometryData(layers=updated_layers), stress_layer_data
+
     def _create_hierarchical_contours(self, stl_polygons: List[Polygon], 
                                     stress_regions: dict, z_height: float, 
                                     layer_id: int, zone_per_slice: Optional[int] = None) -> List[Contour]:
@@ -678,7 +754,7 @@ def save_stl_to_json():
                 tolerance=1e-6
             )
     
-    stl_file: str = r"data/geo_test3.stl"
+    stl_file: str = r"data/geo_test1.stl"
     # STL-only slicing
     stl_only_file = r"data/geometry.json"
     slicer.load_stl(stl_file)   # Read STL File
@@ -690,6 +766,5 @@ def save_stl_to_json():
 if __name__ == "__main__":
     save_stl_to_json()
     print("STL slicing and JSON saving completed.")
-    print("Run tests to verify functionality.")
     
     

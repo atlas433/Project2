@@ -15,7 +15,7 @@ import alphashape
 from collections import Counter
 from alphashape import optimizealpha
 from scipy.spatial import Delaunay, ConvexHull
-
+from shapely import wkt
 from shapely.validation import explain_validity
 
 # Calculate average nearest neighbor distance
@@ -263,7 +263,7 @@ class FEMAnalysis:
         self.nodes = np.concatenate([node_info_sorted, vm_array_sorted[:, 1].reshape(-1, 1)], axis=1)
         return self.nodes # [NodeID, X, Y, Z, VonMises]
     
-    def calculate_stress_thresholds(self, streckgrenze: float = 70, sicherheitsfaktor: float = 1.5) -> tuple[float, float]:
+    def calculate_stress_thresholds(self, streckgrenze: float = 620, sicherheitsfaktor: float = 1.5) -> tuple[float, float]:
         """
         Berechnet die von-Mises-Grenzwerte für Spannungszonen (low, moderate, high)
         unter Berücksichtigung eines Sicherheitsfaktors.
@@ -276,7 +276,7 @@ class FEMAnalysis:
             tuple: (low_max, mod_max) Spannungsgrenzen in MPa.
         """
         sigma_zul = streckgrenze / sicherheitsfaktor
-        low_max = 20 #0.3 * sigma_zul
+        low_max = 0.3 * sigma_zul
         mod_max = 0.7 * sigma_zul
 
         self.stress_threshold = (low_max, mod_max)
@@ -305,7 +305,7 @@ class FEMAnalysis:
 
         z_coords = self.nodes[:, 3]  # Extract Z coordinates from nodes
         fem_nodes = self.nodes[:, 1:5] # Extract X, Y, Z coordinates from nodes
-        tolerance = 0.1 #thickness
+        tolerance = 0.25 #thickness   #0.1
         z_diffs = np.abs(z_coords - z)  # [|z1 - z|, |z2 - z|, ...]
 
         MAX_TRIES = 5
@@ -386,7 +386,6 @@ class FEMAnalysis:
                         if poly.area >= self.min_cluster_area:
                             regions[label].append(poly)
 
-
                     except Exception as e:
                         print(f"[Warning] Failed alphashape for {label}-cluster: {e}")
             
@@ -420,128 +419,6 @@ class FEMAnalysis:
 
         return regions
     
-    def classify_and_cluster_stress_regions_convex(self, xy_points: np.ndarray, stress_values: np.ndarray) -> dict:
-        """
-        Classify XY FEM node coordinates into stress zones and apply clustering
-        to generate geometric regions.
-
-        Args:
-            xy_points (np.ndarray): Array of shape (n, 2) containing X, Y node coordinates.
-            stress_values (np.ndarray): Array of shape (n,) with von Mises stress values.
-
-        Returns:
-            dict: {
-                "low": [Polygon, ...],
-                "moderate": [Polygon, ...],
-                "high": [Polygon, ...]
-            }
-        """
-        low_max, mod_max = self.stress_threshold
-
-        print(f"[INFO] Classifying stress regions with thresholds: low={low_max}, moderate={mod_max}")
-
-        
-        '''
-        # 1. Build masks
-        low_mask = stress_values < low_max
-        moderate_mask = (stress_values >= low_max) & (stress_values < mod_max )
-        high_mask = stress_values >= mod_max
-
-        stress_masks = {
-            "low": low_mask,
-            "moderate": moderate_mask,
-            "high": high_mask
-        }
-
-        # print(f"[INFO] Stress masks created: {len(low_mask)} total nodes, "
-        #       {sum(low_mask)} low, {sum(moderate_mask)} moderate, {sum(high_mask)} high")
-        print(f"[INFO] Stress masks created: {sum(low_mask)} low, "
-                f"{sum(moderate_mask)} moderate, {sum(high_mask)} high")
-
-        '''
-        stress_masks = self.generate_fallback_masks(xy_points, stress_values)
-
-        print(f"[INFO] Stress masks created: "
-            f"{np.sum(stress_masks['low'])} low, "
-            f"{np.sum(stress_masks['moderate'])} moderate, "
-            f"{np.sum(stress_masks['high'])} high")
-
-        regions = {"low": [], "moderate": [], "high": []}
-
-        # OPTIMIZATION 4: Process each stress level with vectorized operations
-        for label, mask in stress_masks.items():
-            if not np.any(mask):
-                continue
-                
-            points = xy_points[mask]
-            if len(points) == 0:
-                continue
-
-            # OPTIMIZATION 5: Use more efficient clustering with early exit
-            if len(points) < self.min_samples:
-                # Skip clustering for very small point sets
-                if len(points) >= 3:
-                    try:
-                        poly = Polygon(points).convex_hull
-                        if poly.area >= self.min_cluster_area:
-                            regions[label].append(poly)
-                           
-                            
-                    except:
-                        pass  # Skip invalid polygons
-                continue
-
-            clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples).fit(points)
-            labels = clustering.labels_
-            
-            # OPTIMIZATION 6: Vectorized cluster processing
-            unique_labels = np.unique(labels)
-            unique_labels = unique_labels[unique_labels != -1]  # Remove noise label
-            
-            for cluster_id in unique_labels:
-                cluster_mask = labels == cluster_id
-                cluster_points = points[cluster_mask]
-                
-                if len(cluster_points) >= 3:
-                    try:
-                        poly = Polygon(cluster_points).convex_hull
-                        if poly.area >= self.min_cluster_area:
-                            regions[label].append(poly)
-                    except:
-                        pass  # Skip invalid polygons
-            
-            # OPTIMIZATION 7: Improved noise handling with vectorized distance computation
-            noise_mask = labels == -1
-            if np.any(noise_mask):
-                noise_points = points[noise_mask]
-                non_noise_points = points[~noise_mask]
-                
-                if len(non_noise_points) > 0:
-                    # Vectorized distance computation using broadcasting
-                    distances = np.linalg.norm(
-                        noise_points[:, np.newaxis, :] - non_noise_points[np.newaxis, :, :], 
-                        axis=2
-                    )
-                    min_distances = np.min(distances, axis=1)
-                    
-                    # Process noise points that are close to clusters
-                    close_noise_mask = min_distances < 1.5 * self.eps
-                    close_noise_points = noise_points[close_noise_mask]
-                    
-                    for pt in close_noise_points:
-                        try:
-                            poly = Point(pt).buffer(self.eps / 2)
-                            if poly.area >= self.min_cluster_area:
-                                regions[label].append(poly)
-                        except:
-                            pass  # Skip invalid polygons
-
-        
-
-        return regions
-    
-    
-
     def generate_fallback_masks(self, xy_points: np.ndarray, stress_values: np.ndarray) -> dict:
         """
         Generate adjusted stress masks with fallback logic.
@@ -551,6 +428,8 @@ class FEMAnalysis:
         Returns:
             dict: Final masks → { "low": mask, "moderate": mask, "high": mask }
         """
+
+        print(f"[INFO] XY-Ponits: {len(xy_points)}")
         low_max, mod_max = self.stress_threshold
 
         masks = {
@@ -601,139 +480,6 @@ class FEMAnalysis:
 
         return adjusted_masks
 
-
-    def classify_and_cluster_stress_regions_concave(self, xy_points: np.ndarray, stress_values: np.ndarray) -> dict:
-        """
-        Classify XY FEM node coordinates into stress zones and apply clustering
-        to generate geometric regions.
-
-        Args:
-            xy_points (np.ndarray): Array of shape (n, 2) containing X, Y node coordinates.
-            stress_values (np.ndarray): Array of shape (n,) with von Mises stress values.
-
-        Returns:
-            dict: {
-                "low": [Polygon, ...],
-                "moderate": [Polygon, ...],
-                "high": [Polygon, ...]
-            }
-        """
-        low_max, mod_max = self.stress_threshold
-
-        print(f"[INFO] Classifying stress regions with thresholds: low={low_max}, moderate={mod_max}")
-
-        
-
-        # 1. Build masks
-        
-        low_mask = stress_values < low_max
-        moderate_mask = (stress_values >= low_max) & (stress_values < mod_max)
-        high_mask = stress_values >= mod_max
-
-        stress_masks = {
-            "low": low_mask,
-            "moderate": moderate_mask,
-            "high": high_mask
-        }
-        
-
-
-        regions = {"low": [], "moderate": [], "high": []}
-
-        # OPTIMIZATION 4: Process each stress level with vectorized operations
-        for label, mask in stress_masks.items():
-            if not np.any(mask):
-                continue
-                
-            points = xy_points[mask]
-            if len(points) == 0:
-                continue
-
-
-            
-
-            # 3. DBSCAN clustering
-            clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples).fit(points)
-            labels = clustering.labels_
-
-            label_counts = Counter(labels)
-            num_clusters = len([lbl for lbl in label_counts if lbl != -1])
-            num_noise = label_counts.get(-1, 0)
-
-            print(f"[DBSCAN Debug] {label.upper()} zone: {num_clusters} clusters, {num_noise} noise points")
-            for cid, count in label_counts.items():
-                print(f"  - {'Noise' if cid == -1 else 'Cluster'} {cid}: {count} points")
-
-
-            
-            # OPTIMIZATION 6: Vectorized cluster processing
-            unique_labels = np.unique(labels)
-            unique_labels = unique_labels[unique_labels != -1]  # Remove noise label
-            
-            for cluster_id in unique_labels:
-                cluster_mask = labels == cluster_id
-                cluster_points = points[cluster_mask]
-
-               
-
-
-                if label == "high":
-                    np.save("high_zone_points.npy", cluster_points)
-                    print("[✅] Saved high zone cluster_points to high_zone_points.npy")
-
-
-
-                
-                
-                if len(cluster_points) >= 3:
-                    try:
-                        # Alpha can be adjusted per stress class
-                        alpha = estimate_alpha(cluster_points)
-                        # alpha = 0.8 if label == "high" else 1.0
-
-                        print(f"[ALPHA] = {alpha}")
-                        
-                        shape = alphashape.alphashape(cluster_points, alpha=alpha)
-                        
-
-                        if shape and not shape.is_empty and shape.area >= self.min_cluster_area:
-                            if isinstance(shape, (Polygon, MultiPolygon)):
-                                regions[label].append(shape)
-                    except Exception as e:
-                        print(f"[Warning] Failed alphashape for {label}-cluster: {e}")
-            
-            # OPTIMIZATION 7: Improved noise handling with vectorized distance computation
-            noise_mask = labels == -1
-            if np.any(noise_mask):
-                noise_points = points[noise_mask]
-                non_noise_points = points[~noise_mask]
-                
-                if len(non_noise_points) > 0:
-                    # Vectorized distance computation using broadcasting
-                    distances = np.linalg.norm(
-                        noise_points[:, np.newaxis, :] - non_noise_points[np.newaxis, :, :], 
-                        axis=2
-                    )
-                    min_distances = np.min(distances, axis=1)
-                    
-                    # Process noise points that are close to clusters
-                    close_noise_mask = min_distances < 1.5 * self.eps
-                    close_noise_points = noise_points[close_noise_mask]
-                    
-                    for pt in close_noise_points:
-                        try:
-                            poly = Point(pt).buffer(self.eps / 2)
-                            if poly.area >= self.min_cluster_area:
-                                regions[label].append(poly)
-                        except:
-                            pass  # Skip invalid polygons
-
-        
-
-        return regions
-    
-
-
     
     # New method to generate stress regions for a specific Z-slice
 
@@ -751,6 +497,7 @@ class FEMAnalysis:
         Returns:
             dict | None: Dictionary mit Stress-Regionen und Schicht-Knoten
         """
+
         # Schritt 1: Hole Knoten in der Schicht
         slice_nodes = self.get_nodes_in_slice(z, thickness)
         
@@ -765,36 +512,44 @@ class FEMAnalysis:
             stress_values=slice_nodes[:, 3]
         )
 
-
-        #regions = self.create_stress_regions(
-         #   xy_points=slice_nodes[:, :2],
-          #  stress_values=slice_nodes[:, 3]
-        #)
-        
         # Schritt 4: Bereinige Überlappungen (ERWEITERT)
         if ensure_no_overlap:
             cleaned_regions = self._clean_overlap_regions_v5(regions)
+            #cleaned_regions = self.trim_and_validate_regions(cleaned_regions, outer_shape)
             print(f"[Cleaned regions with no overlapping is called]")
-            #self._export_cleaned_zones_to_json(cleaned_regions, z)
+            
         else:
             cleaned_regions = regions
-            #self._export_cleaned_zones_to_json(cleaned_regions, z)
 
         # Step 4b: Fill uncovered areas if slice is not fully covered
-        if outer_shape:
+        if outer_shape and ensure_no_overlap:
             cleaned_regions, _ = self.fill_uncovered_gaps(
                 cleaned_regions, outer_shape
             )
             
 
-        # Schritt 5: Zone limiting
-        #if zone_per_slice is not None and zone_per_slice > 0:
-        #    cleaned_regions = self._limit_zones_per_slice(cleaned_regions, zone_per_slice)
-
-        #cleaned_regions = regions
         
+        # Schritt 5: Überprüfung auf Überschneidungen (nur Debug-Zweck)
+        def check_zone_overlaps(zone_a: list, zone_b: list, name_a='Zone A', name_b='Zone B') -> list:
+            
+            overlaps = []
+            for i, poly_a in enumerate(zone_a):
+                for j, poly_b in enumerate(zone_b):
+                    if poly_a.intersects(poly_b):
+                        intersection = poly_a.intersection(poly_b)
+                        if not intersection.is_empty and intersection.area > 1e-6:
+                            print(f"[⚠️] {name_a}[{i}] überschneidet sich mit {name_b}[{j}] → Fläche: {intersection.area:.4f} mm²")
+                            overlaps.append((i, j, intersection.area))
+            if not overlaps:
+                print(f"[✅] Keine Überschneidungen zwischen {name_a} und {name_b} gefunden.")
+            return overlaps
+
+        check_zone_overlaps(cleaned_regions.get("low", []), cleaned_regions.get("moderate", []), "LOW", "MODERATE")
+        check_zone_overlaps(cleaned_regions.get("moderate", []), cleaned_regions.get("high", []), "MODERATE", "HIGH")
+        check_zone_overlaps(cleaned_regions.get("low", []), cleaned_regions.get("high", []), "LOW", "HIGH")
+            
         # Schritt 6: Post-Processing für Hatching-Kompatibilität
-        cleaned_regions = self._prepare_for_hatching(cleaned_regions)
+        #cleaned_regions = self._prepare_for_hatching(cleaned_regions, outer_shape)
         
         # Debug-Ausgabe für z=0.0
         self._print_zone_statistics(z, thickness, regions, cleaned_regions)
@@ -807,44 +562,21 @@ class FEMAnalysis:
 
     
 
-    def fill_uncovered_gaps_old(self, regions, outer_shape, buffer_dist=0.2):
+    # Fill Uncovered Gaps Method
+    # ---------------------------------------------
+    def fill_uncovered_gaps(self, regions, outer_shape, buffer_dist=0):
         """
-        Fill uncovered gaps in the cleaned stress zones by assigning them to the closest valid zone.
-        Basic version: just validates the outer shape and merges zones.
-        """
-        # Step 1: Check if outer shape is valid
-        if not outer_shape or outer_shape.is_empty or not outer_shape.is_valid:
-            return regions, []
-
-        # Step 2: Merge valid polygons for each stress level
-        unified_zones = {}
-        for level in ["low", "moderate", "high"]:
-            polys = regions.get(level, [])
-            valid_polys = [p for p in polys if p and not p.is_empty and p.is_valid]
-            if valid_polys:
-                unified_zones[level] = unary_union(valid_polys)
-            else:
-                unified_zones[level] = None
-
-        # Done for now – more logic will be added later
-        return regions, []
-
-
-    def fill_uncovered_gaps(self, regions, outer_shape, buffer_dist=0.5):
-        """
-        Fill uncovered gaps in the cleaned stress zones by assigning them to the closest valid zone,
-        then merge small patches into the corresponding stress level zones.
+        Füllt nicht abgedeckte Bereiche in den Stresszonen, indem sie der nächstgelegenen Zone zugewiesen werden.
+        Ziel: Die gesamte outer_shape-Fläche soll mit Stresszonen abgedeckt sein.
 
         Args:
-            regions (dict): dict with keys "low", "moderate", "high", each mapping to a list of polygons.
-            outer_shape (Polygon): The full slice shape to be covered.
-            buffer_dist (float): Distance threshold to consider a gap "close" to another zone.
+            regions (dict): dict mit "low", "moderate", "high", jeweils Liste von Polygons.
+            outer_shape (Polygon): Die vollständige Kontur (Slice) der Schicht.
+            buffer_dist (float): Abstandsschwelle für Zuordnung.
 
         Returns:
-            (dict, list): Updated regions dict and assignment log (list of (zone, area)).
+            (dict, list): Aktualisierte Zonen (dict) und Zuordnungsprotokoll (list of (zone, area)).
         """
-        from shapely.ops import unary_union
-
         print("[DEBUG] Starting fill_uncovered_gaps")
 
         if not outer_shape or outer_shape.is_empty or not outer_shape.is_valid:
@@ -856,11 +588,11 @@ class FEMAnalysis:
         assignment_log = []
         cleaned = {"low": [], "moderate": [], "high": []}
 
-        # Merge each zone safely
+        # Vereinheitlichte Zonen erzeugen
         unified_zones = {}
         for category in ["low", "moderate", "high"]:
             polys = regions.get(category, [])
-            print(f"  [DEBUG] {category.upper()} zone: {len(polys)} polygons")
+            print(f"  [DEBUG FILL GAPS] {category.upper()} zone: {len(polys)} polygons")
 
             valid_polys = []
             for p in polys:
@@ -873,44 +605,115 @@ class FEMAnalysis:
             unified_zones[category] = unary_union(valid_polys) if valid_polys else None
             cleaned[category] = valid_polys
 
-        # Global coverage
+        # Gesamtabdeckung berechnen
         all_union_parts = [g for g in unified_zones.values() if g and not g.is_empty]
         if not all_union_parts:
             cleaned["moderate"].append(outer_shape)
             assignment_log.append(("moderate", outer_shape.area))
             return cleaned, assignment_log
+        
 
+        print("[DEBUG] ➕ Initial polygon counts BEFORE gap fill:")
+        for k, v in cleaned.items():
+            print(f"  {k.upper()} = {len(v)} polygons")
+
+
+        # Gaps finden
         merged_union = unary_union(all_union_parts)
         missing_area = outer_shape.difference(merged_union)
         if missing_area.is_empty:
             print("[✅] No uncovered gaps to fill.")
             return cleaned, assignment_log
 
-        print(f"[🧩] Uncovered area: {missing_area.area:.2f} mm²")
+        print(f"[🧩] Uncovered area: {missing_area.area:.4f} mm²")
+        gap_polys = self._split_into_polygons(missing_area)
+        print(f"[INFO] Total uncovered gaps: {len(gap_polys)}")
 
-        for level in reversed(["low", "moderate", "high"]):
-            ref = unified_zones[level]
-            if ref and not ref.is_empty:
-                if missing_area.distance(ref) < 1.5 * buffer_dist:
-                    cleaned[level].append(missing_area)
-                    assignment_log.append((level, missing_area.area))
-                    print(f"[🩹] Assigned uncovered area to {level.upper()} zone")
-                    break
-        else:
-            cleaned["moderate"].append(missing_area)
-            assignment_log.append(("moderate", missing_area.area))
-            print("[🩹] Fallback: Assigned uncovered area to MODERATE zone")
 
-        # Merge patched zones cleanly
+        # 🔍 Entferne Gaps mit zu kleiner Fläche (numerisches Rauschen)
+        MIN_GAP_AREA = 1e-4  # = 0.0001 mm²
+        gap_polys = [g for g in gap_polys if g.area > MIN_GAP_AREA]
+
+
+        for i, gap in enumerate(gap_polys):
+            # Calculate distances to all zones for THIS gap
+            
+            distances = {}
+            for level in ["low", "moderate", "high"]:
+            
+                if unified_zones[level] and not unified_zones[level].is_empty:
+                    distances[level] = gap.distance(unified_zones[level])
+
+            # Find nearest zone (only if we have valid zones)
+            
+
+            if distances:
+                nearest_zone = min(distances, key=distances.get)
+
+                
+                
+                # Assign gap to nearest zone
+                #cleaned[nearest_zone].append(gap)  # Simple assignment - no clipping needed
+
+                combined = unary_union(cleaned[nearest_zone] + [gap])
+                cleaned[nearest_zone] = self._split_into_polygons(combined)
+                print(f"    [DEBUG] ⬆️ {nearest_zone.upper()} now has {len(cleaned[nearest_zone])} polygons after gap {i}")
+
+
+                assignment_log.append((nearest_zone, gap.area))
+                print(f"[🩹] Gap {i} (area={gap.area:.4f}) assigned to {nearest_zone.upper()} (distance={distances[nearest_zone]:.3f})")
+            else:
+                # Fallback if no zones exist (shouldn't happen)
+                cleaned["moderate"].append(gap)
+                assignment_log.append(("moderate", gap.area))
+                print(f"[🩹] Gap {i} (area={gap.area:.4f}) fallback-assigned to MODERATE")
+
+        # Keep the merge step
         cleaned = self._merge_adjacent_zones(cleaned, buffer_distance=buffer_dist)
+
+        print("[DEBUG] 🔄 After merge_adjacent_zones:")
+        for k, v in cleaned.items():
+            print(f"  {k.upper()} = {len(v)} polygons")
+
+        # Nach dem finalen cleaned[level] = trimmed
+        #for level in cleaned:
+        #    cleaned[level] = [p for p in cleaned[level] if p.area > 1e-4]
+
+
+        # Validierung: Nur innerhalb der outer_shape
+        for level in cleaned:
+            trimmed = []
+            for poly in cleaned[level]:
+                inter = poly.intersection(outer_shape)
+                if inter and not inter.is_empty:
+                    trimmed.extend(self._split_into_polygons(inter))
+            cleaned[level] = trimmed
+
+        total_area = sum(p.area for zone in cleaned.values() for p in zone)
+        print(f"[CHECK] Total assigned area: {total_area:.4f} / {outer_shape.area:.4f} mm² ({100 * total_area / outer_shape.area:.1f}%)")
+
         return cleaned, assignment_log
 
-    def _merge_adjacent_zones(self, regions: dict, buffer_distance: float = 0.1) -> dict:
+    def _split_into_polygons(self, geometry):
+        """
+        Converts a geometry into a list of polygons.
+        """
+        if geometry is None or geometry.is_empty:
+            return []
+            
+        if isinstance(geometry, Polygon):
+            return [geometry] if geometry.is_valid and not geometry.is_empty else []
+        elif isinstance(geometry, MultiPolygon):
+            return [geom for geom in geometry.geoms if geom.is_valid and not geom.is_empty]
+        else:
+            return []
+
+    def _merge_adjacent_zones(self, regions: dict, buffer_distance: float = 0) -> dict:
         """
         Merges nearby or touching polygons within each stress level to form cleaner zones.
         Used after adding small patches or filling gaps.
         """
-        from shapely.ops import unary_union
+      
 
         merged = {"low": [], "moderate": [], "high": []}
 
@@ -928,52 +731,1020 @@ class FEMAnalysis:
             merged[stress_level] = self._split_into_polygons(merged_shape)
 
         return merged
+    
 
+    
 
+    # Hatching Preparation Methods  
 
-
-    def _prepare_for_hatching(self, regions: dict) -> dict:
+    # new method to prepare zones for hatching
+    def _prepare_for_hatching(self, regions: dict, outer_shape) -> dict:
         """
-        Bereitet Zonen für optimales Hatching vor.
+        Prepares zones for optimal hatching by detecting and trimming thin protrusions.
         
         Args:
-            regions (dict): Bereinigte Regionen
+            regions (dict): Cleaned regions
+            outer_shape: Boundary shape for validation
             
         Returns:
-            dict: Hatching-optimierte Regionen
+            dict: Hatching-optimized regions
         """
-        
+        print("[DEBUG] =================== HATCHING PREPARATION ===================")
         
         hatching_ready = {"low": [], "moderate": [], "high": []}
+        problem_areas = []  # Track areas that need neck trimming
         
+        # Step 1: Analyze each zone and identify problems
         for stress_level, polygons in regions.items():
-            for poly in polygons:
-                # Entferne sehr schmale Bereiche die Probleme beim Hatching verursachen
-                if self._is_hatchable(poly):
-                    # Optional: Glätte die Konturen für besseres Hatching
-                    smoothed = poly.simplify(0.01, preserve_topology=True)
-                    hatching_ready[stress_level].append(smoothed)
+            print(f"\n[DEBUG] Analyzing {stress_level.upper()} zone: {len(polygons)} polygons")
+            
+            for i, poly in enumerate(polygons):
+                if not poly or poly.is_empty:
+                    continue
+                    
+                print(f"  [DEBUG] Polygon {i}: Area = {poly.area:.3f} mm²")
+                
+                # Check if polygon is hatchable
+                hatchable, problem_type, neck_info = self._analyze_polygon_for_hatching(poly, poly_id=f"{stress_level}_{i}")
+                
+                if hatchable:
+                    # Keep good polygons as-is
+                    hatching_ready[stress_level].append(poly)
+                    print(f"    ✅ Polygon {i} is hatchable")
                 else:
-                    # Verschmelze mit benachbarten Zonen gleichen Typs
-                    print(f"[WARNING] Zone zu schmal für Hatching bei {stress_level}")
+                    # Mark problematic areas for neck trimming
+                    problem_areas.append({
+                        'polygon': poly,
+                        'original_zone': stress_level,
+                        'problem_type': problem_type,
+                        'id': f"{stress_level}_{i}",
+                        'neck_info': neck_info
+                    })
+                    print(f"    ❌ Polygon {i} has problem: {problem_type}")
+        
+        # Step 2: Process problem areas with neck trimming
+        if problem_areas:
+            print(f"\n[DEBUG] Processing {len(problem_areas)} problematic polygons...")
+            hatching_ready = self._trim_necks_and_redistribute(hatching_ready, problem_areas)
+        
+        # Step 3: Validate final result
+        self._validate_hatching_zones(hatching_ready, outer_shape)
         
         return hatching_ready
 
-    def _is_hatchable(self, polygon, min_width: float = 0.2) -> bool:
+
+    def _detect_necks_and_protrusions(self, polygon, hatch_spacing, min_width):
         """
-        Prüft ob ein Polygon breit genug für Hatching ist.
+        Enhanced detection that also identifies WHERE the neck is located.
         
         Args:
-            polygon: Shapely Polygon
-            min_width (float): Minimale Breite in mm
+            polygon: Shapely Polygon to analyze
+            hatch_spacing: Hatch spacing in mm
+            min_width: Minimum acceptable width
+        
+        Returns:
+            tuple: (neck_detected: bool, reason: str, neck_info: dict)
+        """
+        # Method 1: Progressive erosion to detect thin connections
+        erosion_scales = [0.8, 1.2, 1.6, 2.0]  # multiples of hatch_spacing  
+        
+        for scale in erosion_scales:
+            erosion_distance = hatch_spacing * scale
+            eroded = polygon.buffer(-erosion_distance)
+            
+            if eroded.is_empty:
+                continue
+                
+            # Check if erosion breaks the polygon into multiple pieces
+            if hasattr(eroded, 'geoms'):
+                num_pieces = len(list(eroded.geoms))
+                if num_pieces > 1:
+                    # Found a neck - store information about where to cut
+                    neck_info = {
+                        'erosion_scale': scale,
+                        'erosion_distance': erosion_distance,
+                        'pieces': list(eroded.geoms),
+                        'original_polygon': polygon
+                    }
+                    return True, f"Neck detected: erosion at {scale:.1f}x hatch spacing breaks into {num_pieces} pieces", neck_info
+            
+            # Check progressive area loss
+            area_loss = (polygon.area - eroded.area) / polygon.area
+            expected_loss = 0.15 + 0.08 * scale  # Progressive threshold
+            
+            if area_loss > expected_loss:
+                # Found thin protrusion - store erosion info for trimming
+                neck_info = {
+                    'erosion_scale': scale,
+                    'erosion_distance': erosion_distance,
+                    'area_loss': area_loss,
+                    'eroded_shape': eroded,
+                    'original_polygon': polygon
+                }
+                return True, f"Thin protrusion detected: {area_loss*100:.1f}% area loss at {scale:.1f}x erosion", neck_info
+        
+        return False, "No necks or thin protrusions detected", None
+
+
+    def _analyze_polygon_for_hatching(self, polygon, poly_id="", hatch_spacing=0.08, safety_factor=4.0):
+        """
+        Enhanced polygon analysis that returns neck information for trimming.
+        
+        Args:
+            polygon: Shapely Polygon to analyze
+            poly_id: Identifier for debugging
+            hatch_spacing: Hatch spacing in mm
+            safety_factor: Safety multiplier for minimum width
+        
+        Returns:
+            tuple: (is_hatchable: bool, problem_type: str, neck_info: dict)
+        """
+        # Calculate PBF-LB specific requirements
+        min_width = hatch_spacing * safety_factor
+        min_length = 0.75
+        min_area = min_width * min_length * 0.5
+        
+        print(f"    [ANALYZE] Checking polygon {poly_id}...")
+        print(f"      PBF-LB Requirements: hatch={hatch_spacing}mm, min_width={min_width:.4f}mm, min_length={min_length}mm")
+        
+        # Check 1: Minimum area for meaningful hatching
+        if polygon.area < min_area:
+            print(f"      - Area too small for hatching: {polygon.area:.3f} < {min_area:.3f} mm²")
+            return False, "too_small", None
+        
+        # Check 2: Basic width analysis using erosion
+        eroded = polygon.buffer(-min_width/2)
+        if eroded.is_empty:
+            print(f"      - Too narrow for {safety_factor}x hatch spacing: disappears with {min_width:.4f}mm erosion")
+            return False, "too_narrow", None
+        
+        # Check 3: Minimum length for efficient laser operation
+        bounds = polygon.bounds
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        min_dimension = min(width, height)
+        max_dimension = max(width, height)
+        
+        if max_dimension < min_length:
+            print(f"      - Too short for efficient laser operation: {max_dimension:.3f} < {min_length} mm")
+            return False, "too_short", None
+        
+        # Check 4: Aspect ratio
+        aspect_ratio = max_dimension / min_dimension if min_dimension > 0 else float('inf')
+        
+        if aspect_ratio > 20:
+            print(f"      - Extreme aspect ratio: {aspect_ratio:.1f} (problematic for laser scanning)")
+            return False, "elongated", None
+        
+        # Check 5: ENHANCED NECK DETECTION with location info
+        neck_detected, neck_reason, neck_info = self._detect_necks_and_protrusions(polygon, hatch_spacing, min_width)
+        if neck_detected:
+            print(f"      - {neck_reason}")
+            return False, "thin_protrusions", neck_info
+        
+        print(f"      ✅ Polygon passes all PBF-LB hatching checks")
+        print(f"         Area: {polygon.area:.3f} mm², Dimensions: {width:.4f}×{height:.4f} mm, Aspect: {aspect_ratio:.1f}")
+        return True, "good", None
+
+
+    def _trim_necks_and_redistribute(self, hatching_ready, problem_areas):
+        """
+        Trims necks from problematic polygons and redistributes only the neck parts.
+        
+        Args:
+            hatching_ready: Current good zones
+            problem_areas: List of problematic polygons with neck information
+        
+        Returns:
+            dict: Updated zones with trimmed polygons
+        """
+        print(f"\n[TRIM_NECKS] Processing {len(problem_areas)} problematic polygons...")
+        
+        for problem in problem_areas:
+            poly = problem['polygon']
+            original_zone = problem['original_zone']
+            problem_type = problem['problem_type']
+            poly_id = problem['id']
+            neck_info = problem.get('neck_info')
+            
+            print(f"  [TRIM_NECKS] Handling {poly_id} ({problem_type})...")
+            
+            if problem_type == "thin_protrusions" and neck_info:
+                # Try to trim the neck and keep the main body
+                main_body, neck_part = self._separate_neck_from_body(poly, neck_info)
+                
+                if main_body and not main_body.is_empty:
+                    # Keep main body in original zone
+                    hatching_ready[original_zone].append(main_body)
+                    print(f"    → Main body KEPT in {original_zone.upper()} zone")
+                    print(f"      Main body area: {main_body.area:.3f} mm² ({main_body.area/poly.area*100:.1f}% of original)")
+                    
+                    if neck_part and not neck_part.is_empty:
+                        # Assign neck to nearest moderate zone
+                        nearest_moderate = self._find_nearest_moderate_zone(neck_part, hatching_ready)
+                        hatching_ready["moderate"] = self._merge_with_nearest_moderate(neck_part, hatching_ready["moderate"], nearest_moderate)
+                        print(f"    → Neck part assigned to MODERATE zone")
+                        print(f"      Neck area: {neck_part.area:.3f} mm² ({neck_part.area/poly.area*100:.1f}% of original)")
+                else:
+                    # Fallback: assign entire polygon to moderate
+                    nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                    hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                    print(f"    → Could not separate neck, entire polygon assigned to MODERATE")
+            
+            else:
+                # For other problem types, assign entire polygon to moderate
+                nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                print(f"    → {problem_type} assigned to MODERATE zone")
+        
+        return hatching_ready
+
+
+    def _separate_neck_from_body(self, polygon, neck_info):
+        """
+        Separates the neck from the main body using erosion information.
+        
+        Args:
+            polygon: Original polygon with neck
+            neck_info: Information about where the neck is located
+        
+        Returns:
+            tuple: (main_body_polygon, neck_polygon)
+        """
+        try:
+            if 'pieces' in neck_info:
+                # Case 1: Erosion broke polygon into pieces - identify main body
+                pieces = neck_info['pieces']
+                erosion_distance = neck_info['erosion_distance']
+                
+                # Find the largest piece as main body
+                main_piece = max(pieces, key=lambda p: p.area)
+                
+                # Reconstruct main body by dilating back
+                main_body = main_piece.buffer(erosion_distance * 0.9)
+                main_body = main_body.intersection(polygon)  # Clip to original bounds
+                
+                # Neck is the remainder
+                neck_part = polygon.difference(main_body)
+                
+                return main_body, neck_part
+                
+            elif 'eroded_shape' in neck_info:
+                # Case 2: Use eroded shape as main body
+                eroded = neck_info['eroded_shape']
+                erosion_distance = neck_info['erosion_distance']
+                
+                # Reconstruct main body
+                main_body = eroded.buffer(erosion_distance * 0.8)
+                main_body = main_body.intersection(polygon)
+                
+                # Neck is the remainder
+                neck_part = polygon.difference(main_body)
+                
+                return main_body, neck_part
+                
+        except Exception as e:
+            print(f"    [WARNING] Neck separation failed: {e}")
+        
+        return None, None
+
+
+    def _find_nearest_moderate_zone(self, polygon, hatching_ready):
+        """Find the nearest MODERATE zone polygon to merge with."""
+        if "moderate" not in hatching_ready or not hatching_ready["moderate"]:
+            return 0
+        
+        centroid = polygon.centroid
+        min_distance = float('inf')
+        nearest_index = 0
+        
+        for i, moderate_poly in enumerate(hatching_ready["moderate"]):
+            distance = centroid.distance(moderate_poly.centroid)
+            if distance < min_distance:
+                min_distance = distance
+                nearest_index = i
+        
+        return nearest_index
+
+
+    def _merge_with_nearest_moderate(self, problem_polygon, moderate_list, nearest_index):
+        """Merge the problem polygon with the nearest MODERATE zone."""
+        from shapely.ops import unary_union
+        
+        if not moderate_list:
+            return [problem_polygon]
+        
+        if nearest_index >= len(moderate_list):
+            nearest_index = 0
+        
+        try:
+            nearest_moderate = moderate_list[nearest_index]
+            merged = unary_union([nearest_moderate, problem_polygon])
+            
+            updated_list = moderate_list.copy()
+            updated_list[nearest_index] = merged
+            
+            return updated_list
+            
+        except Exception as e:
+            print(f"    [WARNING] Merge failed: {e}, appending separately")
+            return moderate_list + [problem_polygon]
+    # ---------------------------------------------
+    def _prepare_for_hatching_(self, regions: dict, outer_shape) -> dict:
+        """
+        Prepares zones for optimal hatching by detecting and fixing thin protrusions.
+        
+        Args:
+            regions (dict): Cleaned regions
+            outer_shape: Boundary shape for validation
             
         Returns:
-            bool: True wenn hatchbar
+            dict: Hatching-optimized regions
         """
-        # Vereinfachte Prüfung über negative Buffer
+        print("[DEBUG] =================== HATCHING PREPARATION ===================")
+        
+        hatching_ready = {"low": [], "moderate": [], "high": []}
+        problem_areas = []  # Track areas that need redistribution
+        
+        # Step 1: Analyze each zone and identify problems
+        for stress_level, polygons in regions.items():
+            print(f"\n[DEBUG] Analyzing {stress_level.upper()} zone: {len(polygons)} polygons")
+            
+            for i, poly in enumerate(polygons):
+                if not poly or poly.is_empty:
+                    continue
+                    
+                print(f"  [DEBUG] Polygon {i}: Area = {poly.area:.3f} mm²")
+                
+                # Check if polygon is hatchable
+                hatchable, problem_type = self._analyze_polygon_for_hatching(poly, poly_id=f"{stress_level}_{i}")
+                
+                if hatchable:
+                    # Keep good polygons as-is
+                    hatching_ready[stress_level].append(poly)
+                    print(f"    ✅ Polygon {i} is hatchable")
+                else:
+                    # Mark problematic areas for redistribution
+                    problem_areas.append({
+                        'polygon': poly,
+                        'original_zone': stress_level,
+                        'problem_type': problem_type,
+                        'id': f"{stress_level}_{i}"
+                    })
+                    print(f"    ❌ Polygon {i} has problem: {problem_type}")
+        
+        # Step 2: Process problem areas
+        if problem_areas:
+            print(f"\n[DEBUG] Processing {len(problem_areas)} problematic polygons...")
+            hatching_ready = self._redistribute_problem_areas(hatching_ready, problem_areas)
+        
+        # Step 3: Validate final result
+
+        self._validate_hatching_zones(hatching_ready, outer_shape)
+        
+        return hatching_ready
+
+    def _analyze_polygon_for_hatching_(self, polygon, poly_id="", hatch_spacing=0.08, safety_factor=4.0):
+        """
+        Enhanced polygon analysis with improved neck detection for PBF-LB requirements.
+        
+        Args:
+            polygon: Shapely Polygon to analyze
+            poly_id: Identifier for debugging
+            hatch_spacing: Hatch spacing in mm (typically 0.06-0.10 mm for PBF-LB)
+            safety_factor: Safety multiplier for minimum width (3-4x hatch spacing)
+        
+        Returns:
+            tuple: (is_hatchable: bool, problem_type: str)
+        """
+        
+        
+        # Calculate PBF-LB specific requirements
+        min_width = hatch_spacing * safety_factor  # 0.32 mm for 0.08mm spacing, 4x safety
+        min_length = 0.75  # mm - avoid inefficient laser start/stops
+        min_area = min_width * min_length * 0.5  # ~0.12 mm² minimum meaningful area
+        
+        print(f"    [ANALYZE] Checking polygon {poly_id}...")
+        print(f"      PBF-LB Requirements: hatch={hatch_spacing}mm, min_width={min_width:.4f}mm, min_length={min_length}mm")
+        
+        # Check 1: Minimum area for meaningful hatching
+        if polygon.area < min_area:
+            print(f"      - Area too small for hatching: {polygon.area:.3f} < {min_area:.3f} mm²")
+            return False, "too_small"
+        
+        # Check 2: Basic width analysis using erosion
         eroded = polygon.buffer(-min_width/2)
-        return not eroded.is_empty
-    
+        if eroded.is_empty:
+            print(f"      - Too narrow for {safety_factor}x hatch spacing: disappears with {min_width:.4f}mm erosion")
+            return False, "too_narrow"
+        
+        # Check 3: Minimum length for efficient laser operation
+        bounds = polygon.bounds
+        width = bounds[2] - bounds[0]  # max_x - min_x
+        height = bounds[3] - bounds[1]  # max_y - min_y
+        min_dimension = min(width, height)
+        max_dimension = max(width, height)
+        
+        if max_dimension < min_length:
+            print(f"      - Too short for efficient laser operation: {max_dimension:.3f} < {min_length} mm")
+            return False, "too_short"
+        
+        # Check 4: Aspect ratio (very elongated shapes cause laser problems)
+        aspect_ratio = max_dimension / min_dimension if min_dimension > 0 else float('inf')
+        
+        if aspect_ratio > 20:  # Very elongated - problematic for hatching
+            print(f"      - Extreme aspect ratio: {aspect_ratio:.1f} (problematic for laser scanning)")
+            return False, "elongated"
+        
+        # Check 5: ENHANCED NECK DETECTION - Multi-scale erosion analysis
+        neck_detected, neck_reason = self._detect_necks_and_protrusions(polygon, hatch_spacing, min_width)
+        if neck_detected:
+            print(f"      - {neck_reason}")
+            return False, "thin_protrusions"
+        
+        # Check 6: Hatch efficiency (polygon should be "solid" enough for efficient scanning)
+        #convex_hull = polygon.convex_hull
+        #convexity = polygon.area / convex_hull.area if convex_hull.area > 0 else 0
+        #if convexity < 0.4:  # Very non-convex - inefficient hatching
+        #    print(f"      - Low convexity: {convexity:.4f} (inefficient for laser scanning)")
+        #    return False, "complex_shape"
+        
+        # Check 7: Minimum effective hatch area
+        #hatchable_core = polygon.buffer(-hatch_spacing/2)
+        #if not hatchable_core.is_empty:
+        #    hatch_efficiency = hatchable_core.area / polygon.area
+        #    if hatch_efficiency < 0.3:  # Less than 30% can be effectively hatched
+        #        print(f"      - Low hatch efficiency: {hatch_efficiency*100:.1f}% effective hatch coverage")
+        #        return False, "poor_hatch_efficiency"
+        
+        print(f"      ✅ Polygon passes all PBF-LB hatching checks")
+        print(f"         Area: {polygon.area:.3f} mm², Dimensions: {width:.4f}×{height:.4f} mm, Aspect: {aspect_ratio:.1f}")
+        return True, "good"
+
+    def _detect_necks_and_protrusions_(self, polygon, hatch_spacing, min_width):
+        """
+        Simple detection for problematic necks and thin protrusions.
+        Uses the working area loss method but with relaxed thresholds.
+        
+        Args:
+            polygon: Shapely Polygon to analyze
+            hatch_spacing: Hatch spacing in mm
+            min_width: Minimum acceptable width
+        
+        Returns:
+            tuple: (neck_detected: bool, reason: str)
+        """
+        
+        
+        # Method 1: Progressive erosion to detect thin connections
+        erosion_scales = [0.8, 1.2, 1.6, 2.0]  # multiples of hatch_spacing  
+        
+        for scale in erosion_scales:
+            erosion_distance = hatch_spacing * scale
+            eroded = polygon.buffer(-erosion_distance)
+            
+            if eroded.is_empty:
+                continue
+                
+            # Check if erosion breaks the polygon into multiple pieces
+            if hasattr(eroded, 'geoms'):
+                num_pieces = len(list(eroded.geoms))
+                if num_pieces > 1:
+                    return True, f"Neck detected: erosion at {scale:.1f}x hatch spacing breaks into {num_pieces} pieces"
+            
+            # Check progressive area loss
+            area_loss = (polygon.area - eroded.area) / polygon.area
+            expected_loss = 0.15 + 0.08 * scale  # Progressive threshold
+            #expected_loss = 0.35 + 0.05 * scale 
+            
+            if area_loss > expected_loss:
+                return True, f"Thin protrusion detected: {area_loss*100:.1f}% area loss at {scale:.1f}x erosion"
+        
+        return False, "No necks or thin protrusions detected"
+
+    def _detect_necks_and_protrusions_old(self, polygon, hatch_spacing, min_width):
+        """
+        Enhanced neck and thin protrusion detection using multiple methods.
+        
+        Args:
+            polygon: Shapely Polygon to analyze
+            hatch_spacing: Hatch spacing in mm
+            min_width: Minimum acceptable width
+        
+        Returns:
+            tuple: (neck_detected: bool, reason: str)
+        """
+        
+        
+        # Method 1: Progressive erosion to detect thin connections
+        erosion_scales = [0.8, 1.2, 1.6, 2.0]  # multiples of hatch_spacing  
+        
+        for scale in erosion_scales:
+            erosion_distance = hatch_spacing * scale
+            eroded = polygon.buffer(-erosion_distance)
+            
+            if eroded.is_empty:
+                continue
+                
+            # Check if erosion breaks the polygon into multiple pieces
+            if hasattr(eroded, 'geoms'):
+                num_pieces = len(list(eroded.geoms))
+                if num_pieces > 1:
+                    return True, f"Neck detected: erosion at {scale:.1f}x hatch spacing breaks into {num_pieces} pieces"
+            
+            # Check progressive area loss
+            area_loss = (polygon.area - eroded.area) / polygon.area
+            #expected_loss = 0.15 + 0.08 * scale  # Progressive threshold
+            expected_loss = 0.35 + 0.05 * scale 
+            
+            if area_loss > expected_loss:
+                return True, f"Thin protrusion detected: {area_loss*100:.1f}% area loss at {scale:.1f}x erosion"
+        
+        # Method 2: Interior point sampling to find narrow regions
+        bounds = polygon.bounds
+        width_samples = max(15, int((bounds[2] - bounds[0]) / hatch_spacing))
+        height_samples = max(15, int((bounds[3] - bounds[1]) / hatch_spacing))
+        
+        narrow_points = 0
+        total_interior_points = 0
+        
+        for i in range(width_samples):
+            for j in range(height_samples):
+                # Create sample point
+                x = bounds[0] + (bounds[2] - bounds[0]) * i / (width_samples - 1)
+                y = bounds[1] + (bounds[3] - bounds[1]) * j / (height_samples - 1)
+                point = Point(x, y)
+                
+                if polygon.contains(point):
+                    total_interior_points += 1
+                    
+                    # Find distance to polygon boundary
+                    distance_to_boundary = point.distance(polygon.boundary)
+                    
+                    # If distance to boundary is less than half minimum width, it's a narrow region
+                    if distance_to_boundary < min_width / 2.2:  # Slightly more tolerant than min_width/2
+                        narrow_points += 1
+        
+        if total_interior_points > 0:
+            narrow_ratio = narrow_points / total_interior_points
+            if narrow_ratio > 0.25:  # More than 25% of interior points are in narrow regions
+                return True, f"Neck detected: {narrow_ratio*100:.1f}% of interior points in regions narrower than {min_width/2.2:.3f}mm"
+        
+        # Method 3: Skeleton-based width analysis using medial axis approximation
+        # Create a simplified medial axis using erosion/dilation
+        test_distances = np.linspace(hatch_spacing * 0.5, min_width * 0.8, 8)
+        
+        for test_dist in test_distances:
+            eroded = polygon.buffer(-test_dist)
+            if eroded.is_empty:
+                continue
+                
+            # Dilate back to approximate medial axis
+            medial_approx = eroded.buffer(test_dist * 0.9)
+            
+            if not medial_approx.is_empty:
+                # Check if medial axis approximation captures main shape
+                overlap_ratio = medial_approx.intersection(polygon).area / polygon.area
+                
+                if overlap_ratio < 0.7:  # Lost significant area in medial axis approximation
+                    return True, f"Neck detected: medial axis analysis shows narrow connection at {test_dist:.3f}mm"
+        
+        # Method 4: Convex hull analysis for protrusions
+        convex_hull = polygon.convex_hull
+        hull_difference = convex_hull.difference(polygon)
+        
+        if not hull_difference.is_empty:
+            # Check if the missing area from convex hull suggests thin protrusions
+            concave_ratio = hull_difference.area / convex_hull.area
+            
+            if concave_ratio > 0.3:  # Significant concave regions
+                # Test if these concave regions indicate thin protrusions
+                buffered_original = polygon.buffer(hatch_spacing * 0.5)
+                hull_coverage = buffered_original.intersection(convex_hull).area / convex_hull.area
+                
+                if hull_coverage < 0.85:  # Even with buffering, doesn't fill convex hull well
+                    return True, f"Thin protrusion detected: complex concave shape with {concave_ratio*100:.1f}% hull difference"
+        
+        # Method 5: Boundary complexity analysis
+        # Calculate boundary length vs area ratio
+        boundary_length = polygon.boundary.length
+        area_sqrt = np.sqrt(polygon.area)
+        complexity_ratio = boundary_length / (4 * area_sqrt)  # Normalized by square perimeter
+        
+        if complexity_ratio > 2.5:  # Very complex boundary relative to area
+            # This suggests thin protrusions or highly irregular shape
+            return True, f"Complex boundary detected: boundary complexity ratio {complexity_ratio:.2f} suggests thin features"
+        
+        return False, "No necks or thin protrusions detected"
+
+    def _analyze_polygon_for_hatching_old(self, polygon, poly_id="", hatch_spacing=0.08, safety_factor=4.0):
+        """
+        Analyzes a polygon to detect hatching problems based on PBF-LB requirements.
+        
+        Args:
+            polygon: Shapely Polygon to analyze
+            poly_id: Identifier for debugging
+            hatch_spacing: Hatch spacing in mm (typically 0.06-0.10 mm for PBF-LB)
+            safety_factor: Safety multiplier for minimum width (3-4x hatch spacing)
+        
+        Returns:
+            tuple: (is_hatchable: bool, problem_type: str)
+        """
+        # Calculate PBF-LB specific requirements
+        min_width = hatch_spacing * safety_factor  # 0.32 mm for 0.08mm spacing, 4x safety
+        min_length = 0.75  # mm - avoid inefficient laser start/stops
+        min_area = min_width * min_length * 0.5  # ~0.12 mm² minimum meaningful area
+        
+        print(f"    [ANALYZE] Checking polygon {poly_id}...")
+        print(f"      PBF-LB Requirements: hatch={hatch_spacing}mm, min_width={min_width:.4f}mm, min_length={min_length}mm")
+        
+        # Check 1: Minimum area for meaningful hatching
+        if polygon.area < min_area:
+            print(f"      - Area too small for hatching: {polygon.area:.3f} < {min_area:.3f} mm²")
+            return False, "too_small"
+        
+        # Check 2: Width analysis using erosion (critical for hatch lines)
+        eroded = polygon.buffer(-min_width/2)
+        if eroded.is_empty:
+            print(f"      - Too narrow for {safety_factor}x hatch spacing: disappears with {min_width:.4f}mm erosion")
+            return False, "too_narrow"
+        
+        # Check 3: Minimum length for efficient laser operation
+        bounds = polygon.bounds
+        width = bounds[2] - bounds[0]  # max_x - min_x
+        height = bounds[3] - bounds[1]  # max_y - min_y
+        min_dimension = min(width, height)
+        max_dimension = max(width, height)
+        
+        if max_dimension < min_length:
+            print(f"      - Too short for efficient laser operation: {max_dimension:.3f} < {min_length} mm")
+            return False, "too_short"
+        
+        # Check 4: Aspect ratio (very elongated shapes cause laser problems)
+        aspect_ratio = max_dimension / min_dimension if min_dimension > 0 else float('inf')
+        
+        if aspect_ratio > 20:  # Very elongated - problematic for hatching
+            print(f"      - Extreme aspect ratio: {aspect_ratio:.1f} (problematic for laser scanning)")
+            return False, "elongated"
+        
+        # Check 5: Thin protrusions detection (critical for hatch quality)
+        # Compare original area with buffered area using hatch-spacing based erosion
+        hatch_erosion = polygon.buffer(-hatch_spacing)  # Erosion by one hatch spacing
+        if not hatch_erosion.is_empty:
+            area_loss = (polygon.area - hatch_erosion.area) / polygon.area
+            if area_loss > 0.4:  # Lost more than 40% area with hatch-spacing erosion
+                print(f"      - Thin protrusions detected: {area_loss*100:.1f}% area loss with hatch-spacing erosion")
+                return False, "thin_protrusions"
+        
+        # Check 6: Hatch efficiency (polygon should be "solid" enough for efficient scanning)
+        convex_hull = polygon.convex_hull
+        convexity = polygon.area / convex_hull.area if convex_hull.area > 0 else 0
+        if convexity < 0.4:  # Very non-convex - inefficient hatching
+            print(f"      - Low convexity: {convexity:.4f} (inefficient for laser scanning)")
+            return False, "complex_shape"
+        
+        # Check 7: Minimum effective hatch area
+        # After accounting for edge effects, how much area can actually be hatched?
+        hatchable_core = polygon.buffer(-hatch_spacing/2)  # Area that gets full hatch coverage
+        if not hatchable_core.is_empty:
+            hatch_efficiency = hatchable_core.area / polygon.area
+            if hatch_efficiency < 0.3:  # Less than 30% can be effectively hatched
+                print(f"      - Low hatch efficiency: {hatch_efficiency*100:.1f}% effective hatch coverage")
+                return False, "poor_hatch_efficiency"
+        
+        print(f"      ✅ Polygon passes all PBF-LB hatching checks")
+        print(f"         Area: {polygon.area:.3f} mm², Dimensions: {width:.4f}×{height:.4f} mm, Aspect: {aspect_ratio:.1f}")
+        return True, "good"
+
+    # Ditrubution and Redistribution Methods
+
+    def _redistribute_problem_areas_new(self, hatching_ready, problem_areas):
+        """
+        Redistributes problematic areas to MODERATE zone.
+        Keeps good areas in their original zones.
+        
+        Args:
+            hatching_ready: Current good zones
+            problem_areas: List of problematic polygons with metadata
+        
+        Returns:
+            dict: Updated zones with redistributed areas
+        """
+        print(f"\n[REDISTRIBUTE] Processing {len(problem_areas)} problem areas...")
+        
+        for problem in problem_areas:
+            poly = problem['polygon']
+            original_zone = problem['original_zone']
+            problem_type = problem['problem_type']
+            poly_id = problem['id']
+            
+            print(f"  [REDISTRIBUTE] Handling {poly_id} ({problem_type})...")
+            
+            # Strategy: Assign ALL problematic areas to NEAREST MODERATE zone
+            if problem_type in ["thin_protrusions", "complex_shape"]:
+                # Try light simplification first
+                simplified = self._simplify_for_hatching(poly)
+                
+                if simplified and not simplified.is_empty and simplified.area > poly.area * 0.8:
+                    # Use simplified version but assign to nearest MODERATE
+                    nearest_moderate = self._find_nearest_moderate_zone(simplified, hatching_ready)
+                    hatching_ready["moderate"] = self._merge_with_nearest_moderate(simplified, hatching_ready["moderate"], nearest_moderate)
+                    print(f"    → Simplified and merged with nearest MODERATE zone")
+                    print(f"      Area: {poly.area:.3f} → {simplified.area:.3f} mm² ({simplified.area/poly.area*100:.1f}% preserved)")
+                else:
+                    # Use original shape but assign to nearest MODERATE
+                    nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                    hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                    print(f"    → Original shape merged with nearest MODERATE zone")
+                    print(f"      Note: {problem_type} will be handled with MODERATE zone parameters")
+            
+            # Strategy 2: Small/narrow areas go to nearest MODERATE
+            elif problem_type in ["too_small", "too_narrow"]:
+                nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                print(f"    → {problem_type} merged with nearest MODERATE zone (area {poly.area:.3f} mm²)")
+            
+            # Strategy 3: Elongated shapes go to nearest MODERATE
+            elif problem_type == "elongated":
+                nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                print(f"    → Elongated shape merged with nearest MODERATE zone")
+            
+            # Strategy 4: Poor efficiency goes to nearest MODERATE
+            elif problem_type in ["poor_hatch_efficiency"]:
+                nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                print(f"    → Poor efficiency merged with nearest MODERATE zone")
+            
+            # Fallback: any other problem type goes to nearest MODERATE
+            else:
+                nearest_moderate = self._find_nearest_moderate_zone(poly, hatching_ready)
+                hatching_ready["moderate"] = self._merge_with_nearest_moderate(poly, hatching_ready["moderate"], nearest_moderate)
+                print(f"    → {problem_type} merged with nearest MODERATE zone (fallback)")
+        
+        return hatching_ready
+
+    def _find_nearest_moderate_zone_(self, polygon, hatching_ready):
+        """
+        Find the nearest MODERATE zone polygon to merge with.
+        
+        Args:
+            polygon: The problematic polygon to assign
+            hatching_ready: Current zones with polygons
+        
+        Returns:
+            int: Index of nearest MODERATE polygon, or 0 if none found
+        """
+        if "moderate" not in hatching_ready or not hatching_ready["moderate"]:
+            return 0  # No moderate zones available
+        
+        centroid = polygon.centroid
+        min_distance = float('inf')
+        nearest_index = 0
+        
+        for i, moderate_poly in enumerate(hatching_ready["moderate"]):
+            distance = centroid.distance(moderate_poly.centroid)
+            if distance < min_distance:
+                min_distance = distance
+                nearest_index = i
+        
+        return nearest_index
+
+    def _merge_with_nearest_moderate_(self, problem_polygon, moderate_list, nearest_index):
+        """
+        Merge the problem polygon with the nearest MODERATE zone.
+        
+        Args:
+            problem_polygon: The polygon to merge
+            moderate_list: List of current MODERATE polygons
+            nearest_index: Index of the nearest MODERATE polygon
+        
+        Returns:
+            list: Updated MODERATE polygon list
+        """
+        from shapely.ops import unary_union
+        
+        if not moderate_list:
+            return [problem_polygon]
+        
+        if nearest_index >= len(moderate_list):
+            nearest_index = 0
+        
+        try:
+            # Merge with the nearest MODERATE polygon
+            nearest_moderate = moderate_list[nearest_index]
+            merged = unary_union([nearest_moderate, problem_polygon])
+            
+            # Replace the nearest polygon with the merged result
+            updated_list = moderate_list.copy()
+            updated_list[nearest_index] = merged
+            
+            return updated_list
+            
+        except Exception as e:
+            print(f"    [WARNING] Merge failed: {e}, appending separately")
+            # Fallback: just append to the list
+            return moderate_list + [problem_polygon]
+        """
+        Light simplification to smooth small irregularities while preserving main shape.
+        
+        Args:
+            polygon: Input polygon
+            tolerance_factor: Simplification aggressiveness
+        
+        Returns:
+            Simplified polygon or None if failed
+        """
+        try:
+            # Very conservative simplification - just smooth tiny irregularities
+            hatch_spacing = 0.08  # mm
+            tolerance = hatch_spacing * tolerance_factor  # 0.04mm tolerance
+            
+            # Light morphological smoothing
+            smoothed = polygon.buffer(tolerance/2).buffer(-tolerance/2)
+            
+            if smoothed and not smoothed.is_empty and smoothed.area > polygon.area * 0.8:
+                return smoothed
+            else:
+                # Fallback: minimal vertex reduction
+                simplified = polygon.simplify(tolerance/2, preserve_topology=True)
+                if simplified and not simplified.is_empty:
+                    return simplified
+                
+        except Exception as e:
+            print(f"    [WARNING] Simplification failed: {e}")
+        
+        return polygon  # Return original if simplification fails
+    # ---------------------------------------------
+    def _redistribute_problem_areas_(self, hatching_ready, problem_areas):
+        """
+        Redistributes problematic areas to nearby suitable zones.
+        
+        Args:
+            hatching_ready: Current good zones
+            problem_areas: List of problematic polygons with metadata
+            outer_shape: Boundary for validation
+        
+        Returns:
+            dict: Updated zones with redistributed areas
+        """
+        print(f"\n[REDISTRIBUTE] Processing {len(problem_areas)} problem areas...")
+        
+        for problem in problem_areas:
+            poly = problem['polygon']
+            original_zone = problem['original_zone']
+            problem_type = problem['problem_type']
+            poly_id = problem['id']
+            
+            print(f"  [REDISTRIBUTE] Handling {poly_id} ({problem_type})...")
+            
+            # Strategy depends on problem type
+            if problem_type in ["too_small", "too_narrow"]:
+                # Assign to nearest larger zone
+                target_zone = self._find_nearest_suitable_zone(poly, hatching_ready)
+                if target_zone:
+                    hatching_ready[target_zone].append(poly)
+                    print(f"    → Assigned to {target_zone.upper()} (nearest suitable zone)")
+                else:
+                    # Fallback: assign to moderate
+                    hatching_ready["moderate"].append(poly)
+                    print(f"    → Fallback assigned to MODERATE")
+                    
+            elif problem_type in ["thin_protrusions", "complex_shape"]:
+                # Try to simplify/smooth the shape
+                simplified = self._simplify_for_hatching(poly)
+                if simplified and not simplified.is_empty:
+                    # Re-check if simplified version is hatchable
+                    is_good, _ = self._analyze_polygon_for_hatching(simplified, f"{poly_id}_simplified")
+                    if is_good:
+                        hatching_ready[original_zone].append(simplified)
+                        print(f"    → Simplified and kept in {original_zone.upper()}")
+                    else:
+                        # Still problematic, assign to nearest zone
+                        target_zone = self._find_nearest_suitable_zone(simplified, hatching_ready)
+                        hatching_ready[target_zone or "moderate"].append(simplified)
+                        print(f"    → Simplified and assigned to {(target_zone or 'moderate').upper()}")
+                else:
+                    # Simplification failed, assign as-is to nearest zone
+                    target_zone = self._find_nearest_suitable_zone(poly, hatching_ready)
+                    hatching_ready[target_zone or "moderate"].append(poly)
+                    print(f"    → Simplification failed, assigned to {(target_zone or 'moderate').upper()}")
+                    
+            elif problem_type == "elongated":
+                # For elongated shapes, try to split or assign to moderate zone
+                hatching_ready["moderate"].append(poly)
+                print(f"    → Elongated shape assigned to MODERATE")
+        
+        return hatching_ready
+
+
+    def _find_nearest_suitable_zone_(self, problem_poly, hatching_ready):
+        """
+        Finds the nearest zone that has good hatchable polygons.
+        
+        Args:
+            problem_poly: Polygon to relocate
+            hatching_ready: Current good zones
+        
+        Returns:
+            str: Zone name or None
+        """
+        min_distance = float('inf')
+        best_zone = None
+        
+        for zone_name, zone_polys in hatching_ready.items():
+            if not zone_polys:  # Skip empty zones
+                continue
+                
+            # Calculate distance to this zone
+            zone_union = unary_union(zone_polys)
+            distance = problem_poly.distance(zone_union)
+            
+            if distance < min_distance:
+                min_distance = distance
+                best_zone = zone_name
+        
+        print(f"      Nearest suitable zone: {best_zone} (distance: {min_distance:.3f})")
+        return best_zone
+
+
+    def _simplify_for_hatching_(self, polygon, hatch_spacing=0.08):
+        """
+        Applies PBF-LB specific simplification techniques to make polygon more hatchable.
+        
+        Args:
+            polygon: Input polygon
+            hatch_spacing: Hatch spacing for erosion/dilation operations
+        
+        Returns:
+            Polygon: Simplified polygon
+        """
+        try:
+            # Method 1: Hatch-spacing based erosion-dilation to remove sub-hatch features
+            erosion_dist = hatch_spacing * 1.5  # Remove features smaller than 1.5x hatch spacing
+            eroded = polygon.buffer(-erosion_dist)
+            if not eroded.is_empty:
+                restored = eroded.buffer(erosion_dist)
+                if not restored.is_empty and restored.area > polygon.area * 0.6:  # Don't lose too much area
+                    print(f"      Applied hatch-based morphology: {polygon.area:.3f} → {restored.area:.3f} mm²")
+                    return restored
+            
+            # Method 2: Remove thin protrusions using smaller erosion
+            small_erosion = polygon.buffer(-hatch_spacing)
+            if not small_erosion.is_empty:
+                restored_small = small_erosion.buffer(hatch_spacing)
+                if not restored_small.is_empty and restored_small.area > polygon.area * 0.7:
+                    print(f"      Applied protrusion removal: {polygon.area:.3f} → {restored_small.area:.3f} mm²")
+                    return restored_small
+            
+            # Method 3: Polygon simplification (remove unnecessary vertices)
+            simplified = polygon.simplify(hatch_spacing/4, preserve_topology=True)  # Simplify to hatch precision
+            if not simplified.is_empty and simplified.area > polygon.area * 0.8:
+                print(f"      Applied vertex simplification: {polygon.area:.3f} → {simplified.area:.3f} mm²")
+                return simplified
+            
+            # Method 4: Convex hull for very complex shapes (last resort)
+            hull = polygon.convex_hull
+            if hull.area < polygon.area * 1.3:  # Don't add too much area
+                print(f"      Applied convex hull (last resort): {polygon.area:.3f} → {hull.area:.3f} mm²")
+                return hull
+            
+        except Exception as e:
+            print(f"      Simplification error: {e}")
+        
+        # Return original if all methods fail
+        print(f"      No effective simplification possible")
+        return polygon
+
+
+
+    def _validate_hatching_zones(self, hatching_ready, outer_shape):
+        """
+        Validates the final hatching zones.
+        """
+        print(f"\n[VALIDATION] Final hatching zone summary:")
+        
+
+        if not outer_shape or outer_shape.is_empty or not outer_shape.is_valid:
+            print("[❌] Outer shape is invalid")
+        
+        
+        total_area = 0
+        total_polygons = 0
+        
+        for zone_name, zone_polys in hatching_ready.items():
+            zone_area = sum(p.area for p in zone_polys if p and not p.is_empty)
+            poly_count = len([p for p in zone_polys if p and not p.is_empty])
+            total_area += zone_area
+            total_polygons += poly_count
+            
+            print(f"  {zone_name.upper()}: {poly_count} polygons, {zone_area:.4f} mm²")
+        
+        coverage = (total_area / outer_shape.area * 100) if outer_shape.area > 0 else 0
+        print(f"  TOTAL: {total_polygons} polygons, {total_area:.4f} mm² ({coverage:.1f}% coverage)")
+        print("[DEBUG] =================== HATCHING PREPARATION COMPLETE ===================\n")
+
+    # Helper Methods
     def _calculate_coverage(self, regions: dict) -> dict:
         """
         Berechnet die Abdeckung pro Schicht.
@@ -1007,28 +1778,33 @@ class FEMAnalysis:
         """
         Gibt detaillierte Statistiken über die Zonenerstellung aus.
         """
-        #print("=" * 80)
         print(f"[INFO] Schicht bei z={z:.3f} mm (Dicke: {thickness:.3f} mm)")
+
         print("\nOriginal Regionen (mit Überlappungen):")
         for level in ["high", "moderate", "low"]:
-            count = len(original_regions.get(level, []))
-            print(f"  {level:8}: {count} Polygone")
-        
+            polygons = original_regions.get(level, [])
+            count = len(polygons)
+            area = sum(p.area for p in polygons)
+            print(f"  {level:8}: {count} Polygone, Fläche: {area:.4f} mm²")
+            for i, p in enumerate(polygons):
+                print(f"    - [{level.upper()} #{i}] Fläche = {p.area:.4f} mm²")
+
         print("\nBereinigte Regionen (ohne Überlappungen):")
         for level in ["high", "moderate", "low"]:
             polygons = cleaned_regions.get(level, [])
             count = len(polygons)
             area = sum(p.area for p in polygons)
-            print(f"  {level:8}: {count} Polygone, Fläche: {area:.2f} mm²")
-        
+            print(f"  {level:8}: {count} Polygone, Fläche: {area:.4f} mm²")
+            for i, p in enumerate(polygons):
+                print(f"    - [{level.upper()} #{i}] Fläche = {p.area:.4f} mm²")
+
         coverage = self._calculate_coverage(cleaned_regions)
-        print(f"\nGesamtabdeckung: {coverage['total_area']:.2f} mm²")
+        print(f"\nGesamtabdeckung: {coverage['total_area']:.4f} mm²")
         print("Prozentuale Verteilung:")
         for level, pct in coverage['percentages'].items():
             print(f"  {level:8}: {pct:.1f}%")
-        #print("=" * 80)
 
-    
+        
 
     def _export_cleaned_zones_to_json(self, cleaned_regions: dict, z: float):
         output = {}
@@ -1077,8 +1853,27 @@ class FEMAnalysis:
             else:
                 unified_zones[category] = None
         
+        # Vereinige alle Polygone pro Kategorie
+        
+
+
+        print("[DEBUG] Unified Zones Content:")
+        for key, value in unified_zones.items():
+            if value is None:
+                print(f"  {key.upper()}: None")
+            elif isinstance(value, Polygon):
+                print(f"  {key.upper()}: Polygon, Area = {value.area:.4f}, Bounds = {value.bounds}")
+            elif isinstance(value, MultiPolygon):
+                print(f"  {key.upper()}: MultiPolygon with {len(value.geoms)} parts, Total Area = {value.area:.4f}")
+                for i, poly in enumerate(value.geoms):
+                    print(f"    Part {i+1}: Area = {poly.area:.4f}, Bounds = {poly.bounds}")
+            else:
+                print(f"  {key.upper()}: Unknown geometry type: {type(value)}")
+        
         # Prüfe ob die Zonen verschachtelt sind ODER sich überlappen
         is_nested = self._check_if_nested(unified_zones)
+
+        is_nested = True
         
         if is_nested:
             # Verschachtelte oder überlappende Zonen: Verwende dynamische Reihenfolge
@@ -1143,16 +1938,47 @@ class FEMAnalysis:
                 if cleaned_zone and not cleaned_zone.is_empty:
                     processed[category] = cleaned_zone
                     self._add_zone_to_cleaned(cleaned_zone, category, cleaned)
-                    print(f"[✅] {category.upper()} kept with area: {cleaned_zone.area:.2f} mm²")
+                    print(f"[✅] {category.upper()} kept with area: {cleaned_zone.area:.4f} mm²")
                 else:
                     print(f"[⚠️] {category.upper()} was removed after overlap cleaning")
 
 
         
         # Verschmelze fragmentierte Teile
-        cleaned = self._merge_nearby_fragments(cleaned)
+        #cleaned = self._merge_nearby_fragments(cleaned)
         
         return cleaned
+
+
+    def trim_and_validate_regions(self, cleaned_regions: dict, outer_shape: Polygon) -> dict:
+        """
+        Schneidet alle Zonen innerhalb der outer_shape zu und gibt validierte Regionen zurück.
+
+        Args:
+            cleaned_regions (dict): dict mit "low", "moderate", "high" → Liste von Polygone
+            outer_shape (Polygon): Die Gesamtfläche der Schicht
+        
+        Returns:
+            dict: Bereinigte und getrimmte Regionen, zugeschnitten auf outer_shape
+        """
+        print("\n[🔍] Finale Validierung und Trim der Regionen nach dem Cleaning")
+
+        trimmed_regions = {"low": [], "moderate": [], "high": []}
+        total_area = 0.0
+
+        for level in cleaned_regions:
+            for poly in cleaned_regions[level]:
+                if not poly or poly.is_empty:
+                    continue
+                clipped = poly.intersection(outer_shape)
+                if clipped and not clipped.is_empty:
+                    parts = self._split_into_polygons(clipped)
+                    trimmed_regions[level].extend(parts)
+                    total_area += sum(p.area for p in parts)
+
+        print(f"[CHECK] Final assigned area: {total_area:.4f} / {outer_shape.area:.4f} mm² ({100 * total_area / outer_shape.area:.1f}%)")
+
+        return trimmed_regions
 
 
     def _add_zone_to_cleaned(self, geometry, zone_name: str, cleaned: dict):
@@ -1240,7 +2066,7 @@ class FEMAnalysis:
             for i, zone in enumerate(nesting_order):
                 if unified_zones[zone]:
                     area = unified_zones[zone].area
-                    print(f"  {i+1}. {zone}: {area:.2f} area")
+                    print(f"  {i+1}. {zone}: {area:.4f} area")
                     
                     # Zeige Enthaltensein
                     for other_zone in nesting_order:
@@ -1277,12 +2103,22 @@ class FEMAnalysis:
         
         cleaned = {"low": [], "moderate": [], "high": []}
         
-        # Vereinige alle Polygone pro Kategorie
+        # Vereinige alle Polygone pro Kategorie (mit Buffer)
+        buffer_amount = 0.5  # z. B. 0.1 mm Vergrößerung
+
         unified_zones = {}
         for category in ["low", "moderate", "high"]:
             polys = regions.get(category, [])
             if polys:
-                valid_polys = [p for p in polys if p and not p.is_empty]
+                valid_polys = []
+                for p in polys:
+                    if p and not p.is_empty:
+                        if not p.is_valid:
+                            p = p.buffer(0)
+                        if p.is_valid:
+                            # Optional: leicht vergrößern
+                            p = p.buffer(buffer_amount)
+                            valid_polys.append(p)
                 if valid_polys:
                     unified_zones[category] = unary_union(valid_polys)
                 else:
@@ -1573,7 +2409,7 @@ class FEMAnalysis:
         Returns:
             bool: True wenn mindestens eine Zone vollständig in einer anderen enthalten ist
         """
-        threshold = 0.95  # 95% Überlappung gilt als "enthalten"
+        threshold = 0.80  # 95% Überlappung gilt als "enthalten"
         
         # Prüfe alle möglichen Verschachtelungen
         nesting_checks = []
@@ -1601,21 +2437,21 @@ class FEMAnalysis:
         
         # Zusätzliche Checks für umgekehrte Verschachtelungen (falls Daten fehlerhaft sind)
         
-        # High in Moderate (sollte nicht vorkommen, aber zur Sicherheit)
+        # High in Moderate 
         if unified_zones["high"] and unified_zones["moderate"]:
             intersection = unified_zones["high"].intersection(unified_zones["moderate"])
             if not intersection.is_empty and unified_zones["high"].area > 0:
                 high_in_moderate = intersection.area / unified_zones["high"].area > threshold
                 nesting_checks.append(high_in_moderate)
         
-        # Moderate in Low (sollte nicht vorkommen, aber zur Sicherheit)
+        # Moderate in Low 
         if unified_zones["moderate"] and unified_zones["low"]:
             intersection = unified_zones["moderate"].intersection(unified_zones["low"])
             if not intersection.is_empty and unified_zones["moderate"].area > 0:
                 moderate_in_low = intersection.area / unified_zones["moderate"].area > threshold
                 nesting_checks.append(moderate_in_low)
         
-        # High in Low (sollte nicht vorkommen, aber zur Sicherheit)
+        # High in Low 
         if unified_zones["high"] and unified_zones["low"]:
             intersection = unified_zones["high"].intersection(unified_zones["low"])
             if not intersection.is_empty and unified_zones["high"].area > 0:
@@ -2165,10 +3001,13 @@ class FEMAnalysis:
             
         stress_thresholds = self.stress_threshold
 
+        wkt_string = """POLYGON ((0 5.5, 0 4.949999999999999, 0 -5.5, 7.219999909400939 -5.5, 7.599999904632568 -5.5, 7.976207065582275 -4.214638066291809, 7.996007442474365 -4.146987438201904, 8.719320893287659 -3.0198212027549745, 8.757390022277832 -2.960496664047241, 9.769132375717163 -2.082963907718659, 9.822381973266602 -2.036777973175049, 11.04047908782959 -1.4800667941570282, 11.104589462280273 -1.4507662057876587, 12.430224943161011 -1.2600383102893828, 12.499995231628418 -1.25, 26.74992184638977 -1.25, 27.49991798400879 -1.25, 28.825565242767333 -1.4407271027565003, 28.895336151123047 -1.4507653713226318, 30.113444137573243 -2.007474625110626, 30.177555084228516 -2.0367751121520996, 31.18931465148926 -2.914305830001831, 31.242565155029297 -2.96049165725708, 31.965897178649904 -4.08765857219696, 32.00396728515625 -4.1469831466674805, 32.38019981384277 -5.432349157333374, 32.400001525878906 -5.5, 39.62000007629395 -5.5, 40 -5.5, 40 4.949999999999999, 40 5.5, 32.78000144958496 5.5, 32.400001525878906 5.5, 32.023768997192384 4.214633989334106, 32.00396728515625 4.1469831466674805, 31.280635261535643 3.0198162317276003, 31.242565155029297 2.96049165725708, 30.230805587768554 2.0829609394073487, 30.177555084228516 2.0367751121520996, 28.95944709777832 1.4800658583641053, 28.895336151123047 1.4507653713226318, 27.569688892364503 1.2600382685661315, 27.49991798400879 1.25, 13.249991369247436 1.25, 12.499995231628418 1.25, 11.17435975074768 1.4407278954982758, 11.104589462280273 1.4507662057876587, 9.886492347717285 2.0074773848056795, 9.822381973266602 2.036777973175049, 8.81063961982727 2.9143107295036312, 8.757390022277832 2.960496664047241, 8.034076571464539 4.0876628994941715, 7.996007442474365 4.146987438201904, 7.619800281524658 5.432349371910095, 7.599999904632568 5.5, 0.3799999952316293 5.5, 0 5.5))"""
+        outer_shape = wkt.loads(wkt_string)
+
     
         for z in z_heights:
             # Extract nodes and regions with zone limiting
-            slice_result = self.generate_slice_stress_regions(z=z, thickness=thickness)
+            slice_result = self.generate_slice_stress_regions(z=z, thickness=thickness,outer_shape= outer_shape)
             
             # Convert to serializable format
             regions_serializable = {}
@@ -2233,6 +3072,83 @@ class FEMAnalysis:
         
         return results
 
+    def slice_with_stress_analysis_new(self, z: float, thickness: float = 0.25,
+                                     zone_per_slice: int = 3, ensure_no_overlap: bool = False,
+                                     outer_shape: Polygon = None) -> Dict[str, Any]:
+        """
+        Enhanced slicing function for a single Z height.
+
+        Parameters:
+            z (float): Z height to process
+            thickness (float): Layer thickness
+            zone_per_slice (int): Max number of zones per slice
+            ensure_no_overlap (bool): Apply overlap cleaning
+            outer_shape (Polygon): Outer contour for trimming/filling
+
+        Returns:
+            Dict[str, Any]: Processed layer result
+        """
+        if self.nodes is None:
+            self.get_node_data_with_stress()
+
+        stress_thresholds = self.stress_threshold
+
+        slice_result = self.generate_slice_stress_regions(
+            z=z, thickness=thickness,
+            ensure_no_overlap=ensure_no_overlap,
+            outer_shape=outer_shape
+        )
+
+        regions_serializable = {}
+        total_area = 0.0
+        for stress_level, polygons in slice_result["regions"].items():
+            regions_serializable[stress_level] = []
+            for poly in polygons:
+                if hasattr(poly, 'exterior'):
+                    coords = list(poly.exterior.coords[:-1])
+                    regions_serializable[stress_level].append(coords)
+                    total_area += poly.area
+                elif hasattr(poly, 'geoms'):
+                    for sub_poly in poly.geoms:
+                        coords = list(sub_poly.exterior.coords[:-1])
+                        regions_serializable[stress_level].append(coords)
+                        total_area += sub_poly.area
+
+        slice_nodes = slice_result["slice_nodes"]
+        if len(slice_nodes) > 0:
+            slice_stress_values = slice_nodes[:, 3]
+            stress_stats = {
+                "min_stress": float(np.min(slice_stress_values)),
+                "max_stress": float(np.max(slice_stress_values)),
+                "mean_stress": float(np.mean(slice_stress_values)),
+                "std_stress": float(np.std(slice_stress_values)),
+                "median_stress": float(np.median(slice_stress_values)),
+                "low_threshold": float(stress_thresholds[0]),
+                "moderate_threshold": float(stress_thresholds[1])
+            }
+        else:
+            stress_stats = {k: 0.0 for k in [
+                "min_stress", "max_stress", "mean_stress", "std_stress", "median_stress",
+                "low_threshold", "moderate_threshold"]}
+
+        layer_data = StressLayerData(
+            layer_height=float(z),
+            thickness=float(thickness),
+            regions=regions_serializable,
+            node_count=len(slice_nodes),
+            stress_statistics=stress_stats,
+            nodes=slice_nodes
+        )
+
+        return {
+            "layer_data": layer_data,
+            "regions": slice_result["regions"],
+            "slice_nodes": slice_nodes,
+            "stress_thresholds": stress_thresholds,
+            "zone_count": sum(len(polys) for polys in slice_result["regions"].values()),
+            "zone_limit_applied": zone_per_slice is not None
+        }
+    
     def get_fem_model_bounds(self) -> Dict[str, Tuple[float, float]]:
         """
         Get the spatial bounds of the FEM model.

@@ -17,28 +17,28 @@ from layer_geometry import LayerGeometryHandler, LayerGeometryData
 class ProductionConfig:
     """Configuration class for production parameters."""
     # STL Processing
-    stl_file: str = r"C:\DEV\Project2\data\geo_test3.stl"
+    stl_file: str = r"C:\DEV\Project2\data\geo_test1.stl"
     json_file: str = r"C:\DEV\Project2\data\geometry.json"
     csv_file: str = r"C:\DEV\Project2\data\fem_data.csv"
     layer_height: float = 0.1
     merge_overlapping: bool = False
     
     # FEM Analysis
-    rst_file: str = r"C:\DEV\Project2\data\file_test3.rst"
+    rst_file: str = r"C:\DEV\Project2\data\file_test1.rst"
     num_stress_classes: int = 5 # default 3
     
     # Clustering Parameters
-    eps: float = 0.5                   # DBSCAN: radius [mm] (Search radius) 0.3 mm
+    eps: float = 0.3                   # DBSCAN: radius [mm] (Search radius) 0.3 mm
     min_samples: int = 3               # DBSCAN: Cluster forms with at least 3 points
 
-    min_cluster_area: float = 2   # Minimum polygon area = 1 mm² --> it filters out tiny polygons
-    min_nodes: int = 50          # Minimum nodes required in slice (default: 150)
+    min_cluster_area: float = 1   # Minimum polygon area = 1 mm² --> it filters out tiny polygons
+    min_nodes: int = 30          # Minimum nodes required in slice (default: 150)
     max_allowed: float = 0.5   #Maximum tolerance for slice extraction (default: 0.5)
     
     
     
     # Production Limits
-    zone_per_slice: int = 6    #default 3
+    zone_per_slice: int = 10    #default 3
     max_layers: Optional[int] = None
     z_range: Optional[Tuple[float, float]] = None
     
@@ -194,6 +194,31 @@ class IntegratedSlicingWorkflow:
             self.errors.append(error_msg)
             raise
 
+    def process_integrated_slicing_new(self) -> Tuple[LayerGeometryData, List[StressLayerData]]:
+        """
+        Perform integrated STL slicing with stress analysis.
+
+        Returns:
+            Tuple[LayerGeometryData, List[StressLayerData]]: STL geometry and per-layer stress data
+        """
+        self.logger.info("Starting integrated slicing with stress analysis...")
+        try:
+            layer_geometry_data, stress_layer_data = self.slicer.slice_new(
+                dt=self.geometry_data,
+                fem_analyzer=self.fem_analyzer,
+                merge_overlapping=self.config.merge_overlapping,
+                layer_thickness=self.config.layer_height,
+                zone_per_slice=self.config.zone_per_slice
+            )
+            self.logger.info(f"Integrated slicing completed: {len(layer_geometry_data.layers)} layers generated")
+            return layer_geometry_data, stress_layer_data
+
+        except Exception as e:
+            error_msg = f"Integrated slicing failed: {str(e)}"
+            self.logger.error(error_msg)
+            self.errors.append(error_msg)
+            raise
+
     def export_results(self, layer_geometry_data: LayerGeometryData, 
                       stress_layer_data: List[StressLayerData]) -> List[str]:
         """
@@ -251,40 +276,7 @@ class IntegratedSlicingWorkflow:
             self.errors.append(error_msg)
             return output_files
     
-    def get_stl_bounds(self, geometry_data: LayerGeometryData) -> Dict[str, Tuple[float, float]]:
-        """
-        Compute STL bounds (min/max for x, y, z) from LayerGeometryData.
-        
-        Args:
-            geometry_data (LayerGeometryData): The geometry data with layers and contours.
-        
-        Returns:
-            Dict[str, Tuple[float, float]]: Bounds dictionary with keys 'x', 'y', 'z'.
-        """
-        all_points = []
-
-        for layer in geometry_data.layers:
-            z = layer.z_height
-            for contour in layer.contours:
-                # Assume contour.points is a list of (x, y) tuples
-                for x, y in contour.points:
-                    all_points.append((x, y, z))
-
-        if not all_points:
-            raise ValueError("No geometry points found in layer data.")
-
-        all_points_np = np.array(all_points)
-        bounds = {
-            'x': (float(np.min(all_points_np[:, 0])), float(np.max(all_points_np[:, 0]))),
-            'y': (float(np.min(all_points_np[:, 1])), float(np.max(all_points_np[:, 1]))),
-            'z': (float(np.min(all_points_np[:, 2])), float(np.max(all_points_np[:, 2])))
-        }
-        print("==" * 50)
-        print(f"STL Bounds: {bounds}")
-        print("==" * 50)
-
-
-        return bounds
+    
     
     def process_stress_analysis(self, z_heights: List[float]) -> List[StressLayerData]:
         """
@@ -333,11 +325,14 @@ class IntegratedSlicingWorkflow:
                 raise RuntimeError("Module initialization failed")
             
             # Step 2: Process integrated slicing
-            layer_geometry_data = self.process_integrated_slicing()
+            #layer_geometry_data = self.process_integrated_slicing()
+
+            # Step 2: Process integrated slicing and stress analysis
+            layer_geometry_data, stress_layer_data = self.process_integrated_slicing_new()
             
             # Step 3: Process detailed stress analysis
-            z_heights = [layer.z_height for layer in layer_geometry_data.layers]
-            stress_layer_data = self.process_stress_analysis(z_heights)
+            #z_heights = [layer.z_height for layer in layer_geometry_data.layers]
+            #stress_layer_data = self.process_stress_analysis(z_heights)
             
 
             
@@ -498,6 +493,39 @@ class IntegratedSlicingWorkflow:
             self.logger.error(error_msg)
             self.errors.append(error_msg)
             return ""
+        
+    def get_stl_bounds(self, geometry_data: LayerGeometryData) -> Dict[str, Tuple[float, float]]:
+        """
+        Compute STL bounds (min/max for x, y, z) from LayerGeometryData.
+        
+        Args:
+            geometry_data (LayerGeometryData): The geometry data with layers and contours.
+        
+        Returns:
+            Dict[str, Tuple[float, float]]: Bounds dictionary with keys 'x', 'y', 'z'.
+        """
+        all_points = []
+
+        for layer in geometry_data.layers:
+            z = layer.z_height
+            for contour in layer.contours:
+                # Assume contour.points is a list of (x, y) tuples
+                for x, y in contour.points:
+                    all_points.append((x, y, z))
+
+        if not all_points:
+            raise ValueError("No geometry points found in layer data.")
+
+        all_points_np = np.array(all_points)
+        bounds = {
+            'x': (float(np.min(all_points_np[:, 0])), float(np.max(all_points_np[:, 0]))),
+            'y': (float(np.min(all_points_np[:, 1])), float(np.max(all_points_np[:, 1]))),
+            'z': (float(np.min(all_points_np[:, 2])), float(np.max(all_points_np[:, 2])))
+        }
+        
+
+
+        return bounds
 
 
 
